@@ -1,0 +1,952 @@
+---
+title: "Gene expression analysis in Lepus europaeus using DESeq2"
+author: "Danilo Fabrizio Santoro and Jaakko's reseach group"
+date: "2026-03-27"
+output: 
+  html_document: 
+    code_download: true
+    df_print: default
+    fig_caption: yes
+    toc: yes
+    number_sections: true
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+    theme: spacelab
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Learning Objectives
+
+-   Understand the different steps involved in differential gene expression analysis using `DESeq2`.
+-   Execute the analysis pipeline with `DESeq2`.
+-   Generate exploratory and quality control plots for gene expression datasets.
+-   Obtain result tables with comparisons between experimental groups.
+
+## Introduction: Methods for Differential Gene Expression Analysis:
+
+Many methods have been developed for analyzing gene expression data, and new ones are continuously being published. However, only a few are widely recognized as best practices. Among them are packages like [**DESeq2**](https://bioconductor.org/packages/release/bioc/html/DESeq2.html) and [**EdgeR**](https://bioconductor.org/packages/release/bioc/html/edgeR.html). Both are well-established, rigorously tested, and come with extensive documentation and user manuals.
+
+[**Limma-Voom**](https://genomebiology.biomedcentral.com/articles/10.1186/gb-2014-15-2-r29) is another widely, which is generally recommended for datasets with a large number of replicates per group (\>20). This is because it may be less sensitive when applied to datasets with fewer replicates.
+
+In fact, numerous studies compare the performance and results of different methods, often highlighting variability in the outcomes.
+
+** Therefore, there is no single "best" method that universally outperforms all others. ([Soneson and Delorenzi, 2013](https://bmcbioinformatics.biomedcentral.com/articles/10.1186/1471-2105-14-91))**.
+
+![Figure 1.Flowchart of sequencing and assembly of any RNA-Seq experiment](noref_pipeline.png)
+
+** In this tutorial, we will use [DESeq2](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-014-0550-8) for the analysis, as it is one of the most widely used and well-tested methods (which over 17,000 citations of the original paper...)**. `DESeq2` first normalizes count data to correct for factors such as differences in library size. The normalized expression values are then used to generate quality control plots.
+
+Finally, the **DESeq2** pipeline performs the necessary computations for differential expression analysis. In this tutorial, we will cover the main steps, but I encourage you to explore further and consult the [DESeq2 manual](http://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html) for additional details and useful information.
+
+# Gene Expression Analysis with `DESeq2`
+
+The final step of an RNA-seq experiment is typically differential expression analysis, which involves normalizing *raw counts* using an appropriate statistical model and performing a statistical test to identify differentially expressed genes. **At this stage, our main goal is to determine whether the average expression levels differ significantly between experimental groups**.
+
+
+## Dataset: RNAseq of *Lepus species*:
+
+-   ** 2 ** groups:
+
+    -   ** LE **: Lepus europaeus
+    -   ** LT **: Lepus timidus
+    
+-   ** 2 ** types:
+
+    -   ** M **: Male
+    -   ** F **: Female
+
+-   ** 4 ** cell lines:
+
+    -   ** LE4A         **: SRR18740835
+    -   ** LE3A         **: SRR18740836
+    -   ** LE2A         **: SRR18740837
+    -   ** LE1A         **: SRR18740838
+    -   ** LT6A         **: SRR18740839
+    -   ** LT5A         **: SRR18740840
+    -   ** LT4A         **: SRR18740841
+    -   ** LT1A         **: SRR18740842
+
+-   ** 1 ** tissue:
+
+    -   ** Skin ** 
+
+-   ** 4 ** biological replicates:
+
+    -   ** biological samples **: 4 biological replicates
+    
+-   ** Stage ** Development stage:
+
+    -   ** Adult **
+
+-   ** Ref ** Reference specie:
+
+    -   ** LE **: Lepus europaeus
+
+## Install and include necessary libraries
+```{.r}
+source("src/env_setup.R")
+```
+
+## Load libraries
+```{r load libraries, warning=FALSE, message=FALSE}
+library(readr)
+library(DESeq2)
+library(pheatmap)
+library(ggplot2)
+library(RColorBrewer)
+library(ggrepel)
+library(GenomicFeatures)
+library(edgeR)
+library(limma)
+library(AnnotationDbi)
+library(WGCNA)
+library(readxl)
+library(CoExpNets)
+library(pheatmap)
+library(magrittr)
+library(ggrepel)
+library(dendextend)
+library(gridExtra)
+library(Biobase)
+library(tiff)
+# Set options
+options(stringsAsFactors = FALSE)
+```
+
+
+## Importing Expression Data
+
+# file Readcount.xls, sheet ="sheet1".
+
+The expression data, also known as "**raw counts**", are stored in the `csv` (*comma-separated value*) file `vv_counts.csv`. We can import this dataset using the `read.csv()` function.
+
+# Data importing of matrix:
+```{r import data_R}
+# Load data
+data <- read.table(file="in/Counts_LE_Rstudio.txt", row.names = 1, header = TRUE);data
+
+head(data)
+tail(data)
+
+# Remove unwanted columns (adjust accordingly)
+data <- data[,]
+
+head(data)
+
+# log fold change
+LOGFC <- 1
+
+# General threshold for significance in agricultural field
+alpha <- 0.05
+
+```
+
+## Importing Sample Information (Metadata).
+o analyze the dataset properly, we also need to import the metadata associated with the samples. Metadata typically include details such as sample names, experimental conditions, and batch information, which are essential for downstream analyses.
+
+We can import the metadata from a CSV file using the ``read.csv()'` function.
+
+# Data importing of samples:
+```{r import samplemetadata}
+samplemetadata <- read.table("in/Metadata.txt", header = T);samplemetadata
+
+rownames(samplemetadata) <- samplemetadata$sampleName
+
+samplemetadata$group_genotype <- paste0(samplemetadata$group, "_", samplemetadata$Type)
+
+head(samplemetadata)
+
+```
+
+## Quality check - pre filtering
+# check for missing entries
+```{r check for missing entries}
+# this functions check if the data have too many missing values
+gsg <- goodSamplesGenes(t(data))
+gsg$allOK # if TRUE all msamples and genes has passed the QC
+summary(gsg$goodGenes)
+summary(gsg$goodSamples)
+
+### Dissection of transcriptional responses in Lepus species by RNA-Seq
+    # FALSE 3886   
+    # TRUE 20479  
+
+```
+
+# let's remove those genes that did not pass the QC
+```{r}
+filtered_data <- data[gsg$goodGenes == T,]
+```
+
+# exclude unsuited samples
+```{r}
+excluded_samples = c("")
+```
+
+## Filtering of low expressed genes
+
+remove genes with less than 10 reads in at least three samples
+```{r}
+km <- rowSums(filtered_data[, !colnames(filtered_data) %in% excluded_samples] >= 10) >= 3
+
+table(km)
+  #km
+  #FALSE  #TRUE 
+  #4908  #16480
+
+  #km
+  #FALSE  #TRUE 
+  #5334  #15145
+
+5334/(5334 + 15145 ) # ~ 26% of the genes were removed here, which means that many genes are not being expressed in skin tissue, or they are expressed at very low levels (which can be due to technical noise or biological reasons).
+
+filtered_data <- filtered_data[km, !colnames(filtered_data) %in% excluded_samples]
+
+write.table(filtered_data,
+            file = "filtered_data.txt",
+            sep = "\t",
+            quote = FALSE,
+            row.names = TRUE,
+            col.names = NA)
+```
+
+## Data normalization using DESeq2
+
+# Creating a `DESeqDataSet` Object:
+
+To begin the analysis with `DESeq2`, three essential components are required:
+
+1.  A **count** table: This table **must** contain raw counts (recognizable as integer values). Rows represent genes (or transcripts), while columns correspond to different samples.
+
+2.  A table called **colData**: This table describes the samples and the experimental design, including relevant metadata.
+
+3.  A **formula**: This specifies the variable of interest in the analysis (e.g., treatment, genotype) along with any optional covariates (e.g., batch effects, temperature, etc.).
+
+Since we have already imported and stored these data in memory, we can use the `DESeqDataSetFromMatrix` function to create our dataset:
+
+> NOTE: in **R** a **`formula`** is indicated using the following special character: \~, known as "tilde".
+
+We chose median of ratios normalization instead of Variance Stabilizing Transformation (VST) method (https://hbctraining.github.io/DGE_workshop/lessons/02_DGE_count_normalization.html)
+```{r}
+# Create a `DESeqDataSet` object, normalize expression data
+# Load the filtered count data and sample metadata
+dds <- DESeqDataSetFromMatrix(countData = filtered_data, 
+                              colData = samplemetadata[!rownames(samplemetadata) %in% excluded_samples,], 
+                              design = ~ group_genotype)
+
+```
+
+## Filtering Lowly Expressed Genes
+
+As mentioned earlier, filtering out genes with very low expression is essential to ensure accurate quantification and improve the robustness of the differential expression analysis.
+
+We can visualize the distribution of raw counts before and after filtering to better understand how many lowly expressed genes are present in our dataset.
+
+Visualizing the Distribution of Raw Counts
+To examine the distribution of gene expression levels, we can use a histogram or boxplot.
+
+## Using a Boxplot to Visualize Expression Data Distributions
+```{r}
+head(assay(dds))
+```
+
+```{r}
+boxplot(assay(dds))
+```
+
+A **`boxplot`** is a useful way to explore the distribution of expression data in a `data.frame`. It helps visualize variability and potential outliers across samples.
+
+In RNA-seq data, the distributions are often dominated by a few highly expressed genes, while most genes have relatively low expression levels. This skewness can be mitigated by applying a log transformation.
+
+Since RNA-seq data are highly skewed, taking the `log transformation`. helps visualize the data more clearly. We typically use `log2` transformation (adding 1 to avoid log(0):
+
+This transformation reduces the impact of highly expressed genes, making it easier to compare the overall distributions across samples.
+```{r}
+boxplot(log2(assay(dds)))
+```
+
+### Analyzing the Distribution of Counts:
+
+To gain a deeper understanding of the expression data, we can examine the distribution of counts across samples using different visualization techniques. This helps identify potential biases, batch effects, or the presence of lowly expressed genes.
+```{r}
+# Check distributions of samples using boxplots
+boxplot(log2(assay(dds)), xlab = "", ylab = "Log2 counts per million", las = 2, main = "Raw counts Distributions")
+# Let's add a blue horizontal line that corresponds to the median values
+abline(h = median(log2(assay(dds))), col = "blue")
+```
+
+### Visualizing the Effect of Log Transformation with a Scatter Plot:
+
+A scatter plot is another useful way to observe how the log transformation affects RNA-seq count data. The raw counts are typically highly skewed, with a few genes having extremely high expression levels. Applying a log transformation makes the data more comparable and easier to interpret.
+```{r}
+plot(assay(dds)[,3:4])
+plot(log2(assay(dds)[,3:4]+1))
+```
+
+## `DESeq2` pipeline: Visualizing Dispersion Estimates in DESeq2
+
+Dispersion is a key parameter in RNA-seq differential expression analysis. It measures the variability of gene expression across replicates, helping DESeq2 account for biological and technical variation when estimating fold changes.
+```{r, cache=TRUE}
+
+# Run DESeq to estimate dispersions
+
+# Normalize and transform the data in the `DESeqDataSet` object using the  median of ratios method `DESeq()`
+dds_norm <- DESeq(dds)
+
+# Plot the dispersion estimates
+#plotDispEsts(dds, main = "Dispersion Estimates in DESeq2")
+
+```
+
+# Understanding the Plot
+Each dot represents a gene.
+1.  The y-axis shows the estimated dispersion (how much variation there is across samples).
+2.  The x-axis represents the mean expression level for each gene.
+3.  The red line is the fitted trend used by DESeq2 to model dispersion as a function of mean expression.
+
+## "Regularizing" Data with `rlog()`: Log-Transformed Normalization:
+
+RNA-seq count data are highly skewed, with a few genes having very high expression levels. To make the data more comparable across samples, `log transformation` is often used. However, applying a simple `log2(counts + 1)` transformation can still be problematic, especially for low-count genes.
+
+To address this, `DESeq2` provides the `regularized log transformation (rlog)`, which stabilizes variance across different expression levels. This is particularly useful for exploratory analysis, such as PCA or clustering.
+```{r, cache=TRUE}
+rld <- rlog(dds_norm)
+```
+
+```{r}
+boxplot(assay(rld), xlab = "", ylab = "Log2 counts per million", las = 2, main = "Normalised Distributions")
+# Let's add a blue horizontal line that corresponds to the median logCPM
+abline(h = median(assay(rld)), col = "blue")
+```
+
+## Comparing `log2(counts+1)` vs `rlog` transformation:
+
+To understand the differences between a simple `log2 transformation` and the `regularized log (rlog())` transformation, we can visualize their effects on RNA-seq count data.
+```{r, fig.width=4, fig.height=4}
+plot(log2(counts(dds_norm, normalized=TRUE)[, 1:2]+1), pch = 16, cex = .3)
+plot(assay(rld[, 1:2]), pch = 16, cex = .3)
+```
+
+## How `rlog` Stabilizes Variance:
+
+The regularized log transformation `rlog` in `DESeq2` is particularly useful for stabilizing variance, especially for genes with low expression levels, which are more prone to measurement noise and uncertainty. This helps improve distance calculations between samples, making clustering and principal component analysis (PCA) more accurate.
+
+![Figure 2.The effect of the rlog on the variance (Love et al., 2014)](Variance.png)
+
+## Hierarchical Clustering of RNA-seq Samples:
+
+Hierarchical clustering is a useful approach for exploring the relationships between RNA-seq samples based on gene expression patterns. The `rlog-transformed` or `vst-transformed` data are preferred for clustering, as they stabilize variance and improve distance calculations.
+
+## Compute Sample Distances:
+
+We use Euclidean distance to measure similarity between samples and apply hierarchical clustering.
+
+Key Points:
+
+1.    The `dendrogram` groups similar samples together based on their expression profiles.
+2.    The `height of branches` represents the similarity between samples (shorter branches = more similar).
+3.    Using `rlog()` reduces noise from lowly expressed genes, improving clustering accuracy.
+
+
+```{r}
+
+pdf("hierarchical_clustering_novel_Brown_hare.pdf", width = 12, height = 6)
+sampleDists <- dist(t(assay(rld)))
+sampleDistMatrix <- as.matrix(sampleDists)
+plot(hclust(sampleDists))
+
+# Plot the dendrogram
+#plot(hc, main = "Hierarchical Clustering of Samples")
+
+# Close the PDF device
+dev.off()
+
+```
+
+# Save hierarchical_clustering plot
+```{r}
+# Create the "plots" folder if it doesn't exist
+dir.create("plots", showWarnings = FALSE)
+
+# Open the PDF device, specifying the path and dimensions
+pdf(file.path("plots", "hierarchical_clustering_Brown_hare.pdf"), width = 12, height = 6)
+
+# Compute sample-to-sample distances
+sampleDists <- dist(t(assay(rld)))
+sampleDistMatrix <- as.matrix(sampleDists)
+
+# Generate the hierarchical clustering plot
+plot(hclust(sampleDists), main = "Hierarchical Clustering of Samples")
+
+# Close the PDF device to finalize the file
+dev.off()
+
+```
+
+## Heatmap of Sample Distances:
+
+A heatmap provides an alternative visualization of sample similarity.
+
+Interpretation:
+
+-   Samples with similar expression profiles cluster together.
+-   Darker colors indicate greater similarity, while lighter colors indicate greater differences.
+-   Helps identify potential batch effects or unexpected clustering patterns
+
+
+```{.r}
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap_1 <- pheatmap(
+  sampleDistMatrix,
+  clustering_distance_rows = sampleDists,
+  clustering_distance_cols = sampleDists,
+  col = colors,
+  main = "Sample-to-sample distances"
+)
+
+ggsave(filename = "pheatmap_1.pdf", plot = pheatmap_1, device = "pdf", width = 14, height = 10, dpi = 800)
+```
+
+# Save pheatmap plot
+```{r}
+
+dir.create("plots", showWarnings = FALSE)
+
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+
+pheatmap(
+  sampleDistMatrix,
+  clustering_distance_rows = sampleDists,
+  clustering_distance_cols = sampleDists,
+  col = colors,
+  main = "Sample-to-sample distances",
+  filename = file.path("plots", "pheatmap_1.pdf"),
+  width = 14,
+  height = 10
+)
+
+```
+
+# Add annotations to the graph as follows:
+```{.r}
+annotation <- samplemetadata[, c("group", "genotype")]
+sample_heatmap <- pheatmap::pheatmap(sampleDistMatrix, 
+                                     annotation = annotation,
+                                     clustering_distance_rows = sampleDists,
+                                     clustering_distance_cols = sampleDists,
+                                     col = colors,
+                                     main = "Sample-to-sample distances")
+sample_heatmap
+
+ggsave(filename = "sample_heatmap.pdf", plot = sample_heatmap, device = "pdf", width = 14, height = 10, dpi = 800)
+
+```
+
+# Save Sample-to-sample distances plot
+```{r}
+
+dir.create("plots", showWarnings = FALSE)
+
+
+annotation <- samplemetadata[, c("group", "Sex")]
+
+
+pheatmap::pheatmap(
+  sampleDistMatrix, 
+  annotation = annotation,
+  clustering_distance_rows = sampleDists,
+  clustering_distance_cols = sampleDists,
+  col = colors,
+  main = "Sample-to-sample distances",
+  filename = file.path("plots", "sample_heatmap.pdf"),
+  width = 14,
+  height = 10
+)
+
+```
+
+Or we can use the correlation coefficient between the samples:
+
+```{.r save correlation results}
+
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(
+  sampleDistMatrix,
+  clustering_distance_rows = sampleDists,
+  clustering_distance_cols = sampleDists,
+  col = colors,
+  main = "Sample-to-sample distances"
+)
+annotation <- samplemetadata[, c("group", "genotype")]
+
+
+#pdf("heatmap_distances.pdf", 12, 9)
+pheatmap_7 <- pheatmap::pheatmap(sampleDistMatrix, 
+                     annotation = annotation,
+                     clustering_distance_rows = sampleDists,
+                     clustering_distance_cols = sampleDists,
+                     col = colors,
+                     main = "Sample-to-sample distances")
+#dev.off()
+
+ggsave(filename = "pheatmap_7.pdf", plot = pheatmap_7, device = "pdf", width = 14, height = 10, dpi = 800)
+
+```
+
+# Save correlation results plots
+```{r}
+
+dir.create("plots", showWarnings = FALSE)
+
+
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+
+
+annotation <- samplemetadata[, c("group", "Sex")]
+
+
+pheatmap::pheatmap(
+  sampleDistMatrix,
+  annotation = annotation,
+  clustering_distance_rows = sampleDists,
+  clustering_distance_cols = sampleDists,
+  col = colors,
+  main = "Sample-to-sample distances",
+  filename = file.path("plots", "pheatmap_7.pdf"),
+  width = 14,
+  height = 10
+)
+
+```
+
+
+## Heatmap correlation between samples
+```{.r}
+rld_cor <- cor(assay(rld))
+# Plot heatmap
+#tiff('pheatmap.tiff',4000,2500,res=400)
+#pheatmap = pheatmap(rld_cor, annotation = annotation)
+#dev.off()
+#ggsave(filename = "pheatmap.pdf", device = "pdf", width = 10, height = 10, dpi = 300)
+# Save results
+rld_cor <- cor(assay(rld))
+
+
+#pdf("heatmap_correlations.pdf", 12, 9)
+pheatmap_10 <- pheatmap(rld_cor, annotation = annotation, main = "Sample-to-sample correlations")
+#dev.off()
+#Correlation=pheatmap(rld_cor, annotation = annotation, main = "Sample-to-sample correlations")
+#ggsave(filename = "Correlation.pdf", device = "pdf", width = 10, height = 10, dpi = 300)
+
+ggsave(filename = "pheatmap_10.pdf", plot = pheatmap_10, device = "pdf", width = 14, height = 10, dpi = 800)
+
+
+```
+
+##########################################################################################
+##########################################################################################
+
+
+## Principal Component Analysis (PCA) in RNA-seq Analysis:
+
+Principal Component Analysis (PCA) is a technique used to emphasize variation and identify strong patterns in a dataset. It is particularly useful for dimensionality reduction, making complex, high-dimensional data easier to interpret.
+
+PCA is a technique used to emphasize variation and highlight strong patterns within a dataset, making it a valuable tool for dimensionality reduction. Similar to the previously discussed heatmaps, PCA is particularly useful for visualizing differences (variance) between samples.
+
+This is an *unsupervised* analysis, meaning that experimental groups do not need to be specified beforehand. If the experiment was successful, we would expect to see replicates clustering closely together, while the major sources of variance should correspond to the experimental groups of interest.
+
+If you'd like to dive into it and have more details, please see the following video: [StatQuest's video](https://www.youtube.com/watch?v=_UVHneBUBW0).
+
+Details regarding PCA are given below (based on materials from StatQuest, and if you would like a more thorough description, we encourage you to explore StatQuest’s video.
+
+If you had two samples and wanted to plot the counts of one sample versus another, you could plot the counts of one sample on the x-axis and the other sample on the y-axis as shown below:
+
+# PCA_1
+```{.r PCA analysis}
+#rld <- rlog(dds_norm)
+# vsd <- vst(dds)
+pdf("pca.pdf", 12, 6)
+pca <- DESeq2::plotPCA(rld, intgroup = c("group", "genotype"))
+pca
+dev.off()
+
+ggsave(filename = "pca_DFS.pdf", plot = pca, device = "pdf", width = 14, height = 10, dpi = 800)
+```
+
+# Save PCA_1
+```{.r}
+
+dir.create("plots", showWarnings = FALSE)
+
+
+pca <- DESeq2::plotPCA(rld, intgroup = c("group", "genotype"))
+
+
+ggsave(
+  filename = file.path("plots", "pca_DFS.pdf"),
+  plot = pca,
+  device = "pdf",
+  width = 14,
+  height = 8,
+  dpi = 800
+)
+
+```
+
+
+> from Michael Love <https://support.bioconductor.org/p/9137794/#9137796>:
+>
+> We focus on the top genes by variance (in transformed space) because this focuses the plot on genes with most differences. This is kind of a tautology... We are not for example interested in the tens of thousands of genes that are not, or barely, detected.
+
+# PCA_2
+```{.r}
+pdf("pca2.pdf", 12, 6)
+ggplot(pcaData, aes(PC1, PC2, color=group, shape=genotype)) +
+  geom_point(size=3) +
+  scale_shape_manual(values = c(
+    "bahiense"       = 0,
+    "don_eduardo"    = 1,
+    "don_juan"       = 2,
+    "don_pablo"      = 3,
+    "ermelo"         = 4,
+    "morpa"          = 5,
+    "ota"            = 6,
+    "tanganyikaINTA" = 7,
+    "tanganyikaUSDA" = 8,
+    "victoria"       = 9
+  )) +
+  xlab("PC1") + ylab("PC2") +
+  coord_fixed()
+dev.off()
+```
+
+# Save PCA_2
+```{.r}
+
+dir.create("plots", showWarnings = FALSE)
+
+
+pca2 <- ggplot(pcaData, aes(PC1, PC2, color = group, shape = genotype)) +
+  geom_point(size = 3) +
+  scale_shape_manual(values = c(
+    "bahiense"       = 0,
+    "don_eduardo"    = 1,
+    "don_juan"       = 2,
+    "don_pablo"      = 3,
+    "ermelo"         = 4,
+    "morpa"          = 5,
+    "ota"            = 6,
+    "tanganyikaINTA" = 7,
+    "tanganyikaUSDA" = 8,
+    "victoria"       = 9
+  )) +
+  xlab("PC1") + ylab("PC2") +
+  coord_fixed()
+
+
+ggsave(
+  filename = file.path("plots", "pca2.pdf"),
+  plot = pca2,
+  device = "pdf",
+  width = 12,
+  height = 6
+)
+
+```
+
+# PCA_3
+```{.r}
+pdf("pca3.pdf", 12, 6)
+pcaData <- plotPCA(rld, intgroup=c("group","genotype"), returnData=TRUE)
+
+ggplot(pcaData, aes(PC1, PC2, fill=group, shape=genotype)) +
+  geom_point(size=3, color="black", stroke=1) +  # color=black è il contorno
+  scale_shape_manual(values = c(
+    "bahiense"       = 21,
+    "don_eduardo"    = 22,
+    "don_juan"       = 23,
+    "don_pablo"      = 24,
+    "ermelo"         = 25,
+    "morpa"          = 21,
+    "ota"            = 22,
+    "tanganyikaINTA" = 23,
+    "tanganyikaUSDA" = 24,
+    "victoria"       = 25
+  )) +
+  labs(x = "PC1", y = "PC2") +
+  coord_fixed()
+dev.off()
+
+```
+
+### Another way to see the PCA results
+
+# PCA_4
+```{.r Principal Component Analysis (PCA)}
+#rld <- rlog(dds_norm)
+# vsd <- vst(dds)
+pca <- DESeq2::plotPCA(rld, intgroup = c("group", "genotype"))
+pca
+
+rld_cor <- cor(log2(counts(dds_norm, normalized=T)+1))
+    
+    # Plot heatmap
+    pdf("pca3.pdf", 15, 11)
+    pheatmap(rld_cor, annotation = samplemetadata)
+    dev.off()
+    
+    # log2(counts+1) e rlog
+    #plot(log2(counts(dds_norm, normalized=TRUE)[, 1:2]+1))
+    #plot(assay(rld[, 1:2]))
+    #summary(results(dds))
+```
+
+# Save PCA_4
+```{r}
+
+dir.create("plots", showWarnings = FALSE)
+
+
+pca <- DESeq2::plotPCA(rld, intgroup = c("Species", "Type"))
+
+
+ggsave(
+  filename = file.path("plots", "pca3_plot_Brown_hare_Type.pdf"),
+  plot = pca,
+  device = "pdf",
+  width = 12,
+  height = 8
+)
+
+
+rld_cor <- cor(log2(counts(dds_norm, normalized = TRUE) + 1))
+
+
+pheatmap::pheatmap(
+  rld_cor,
+  annotation = samplemetadata,
+  filename = file.path("plots", "pca3_heatmap_Brown_hare.pdf"),
+  width = 15,
+  height = 11
+)
+
+```
+
+## Principal Component Analysis (PCA) with Top 100 Genes:
+
+The following script performs Principal Component Analysis (PCA) on RNA-seq data using DESeq2. The analysis focuses on the top 100 most variable genes, which helps to highlight differences between samples, particularly across different ploidy levels (2x, 4x) and parental genotypes.
+
+Increasing the number of top genes (ntop=500, ntop=1000, ntop=3000) allows for a broader perspective, potentially capturing more subtle patterns, but at the cost of introducing more noise.
+
+# PCA_5
+```{.r Running PCA with Different ntop Values}
+# Perform PCA using the top 100 most variable genes
+
+pca <- DESeq2::plotPCA(rld, intgroup = c("Species", "sampleName"), ntop=100)
+pca
+# altre possibilità
+pca <- DESeq2::plotPCA(rld, intgroup = c("Species", "sampleName"), ntop=500)
+pca
+pca <- DESeq2::plotPCA(rld, intgroup = c("Species", "sampleName"), ntop=1000)
+pca
+pca <- DESeq2::plotPCA(rld, intgroup = c("Species", "sampleName"), ntop=3000)
+pca
+
+# creo i dati per il grafico
+pcaData <- plotPCA(rld, intgroup=c("Species", "sampleName"), returnData = TRUE, ntop=100)
+
+pdf("pca_top_100.pdf", 16, 9) 
+
+# Alternative options: increasing the number of top genes considered
+ggplot(pcaData, aes(PC1, PC2, 
+                    color = group,    # Mantiene la palette colori di default
+                    shape = genotype  # Assegniamo i simboli ai genotipi
+)) +
+  geom_point(size = 3.5) +
+  geom_text_repel(aes(label = rownames(pcaData)), max.overlaps = 15) + 
+  # Qui mappiamo *manualmente* un simbolo a ciascun livello di "genotype"
+  scale_shape_manual(values = c(
+    "bahiense"       = 16,  # cerchio pieno
+    "don_eduardo"    = 17,  # triangolo pieno
+    "don_juan"       = 15,  # quadrato pieno
+    "don_pablo"      = 3,   # plus (+)
+    "ermelo"         = 7,   # quadrato con X (o shape simile)
+    "morpa"          = 8,   # asterisco
+    "ota"            = 9,   # diamond plus
+    "tanganyikaINTA" = 10,  # cerchio con +
+    "tanganyikaUSDA" = 12,  # quadrato con +
+    "victoria"       = 13   # cerchio con ×
+  )) +
+  xlab("PC1 - 75% variance") +
+  ylab("PC2 - 8% variance") + 
+  ggtitle("PCA top 100 genes") + 
+  coord_cartesian(xlim = c(-15, 70), ylim = c(-15, 30))
+dev.off()
+```
+
+# novel
+
+```{r}
+dir.create("plots", showWarnings = FALSE)
+
+
+pca <- DESeq2::plotPCA(rld, intgroup = c("Species", "Type"))
+
+
+ggsave(
+  filename = file.path("plots", "pca3_plot.pdf"),
+  plot = pca,
+  device = "pdf",
+  width = 12,
+  height = 8
+)
+
+
+rld_cor <- cor(log2(counts(dds_norm, normalized = TRUE) + 1))
+
+
+pheatmap::pheatmap(
+  rld_cor,
+  annotation = samplemetadata,
+  filename = file.path("plots", "pca3_heatmap.pdf"),
+  width = 15,
+  height = 11
+)
+```
+
+# PCA_0_4
+```{r}
+data_rlog <- plotPCA(rld, intgroup=c("Species","Type"),
+                     returnData=TRUE, ntop=50000)
+
+percentVar <- round(100 * attr(data_rlog, "percentVar"))
+
+pdf("PCA_rlog_FINALE2.pdf", width = 10, height = 8)
+
+ggplot(data_rlog, aes(PC1, PC2,
+                      color = Species,
+                      shape = Type)) +
+  geom_point(size = 4) +
+  geom_text_repel(aes(label=name), size = 3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  coord_fixed() +
+  theme_bw(base_size = 14)
+
+dev.off()
+
+```
+
+
+################################################################################
+################################################################################
+
+### `DESeq2`*results*:
+
+### In the following analysis, it is importantt to specify the contrasts we have chosen to analyze.
+```{r}
+samplemetadata
+condizione_1 <- "LE_parental_Parental"
+condizione_2 <- "LT_parental_Parental"
+
+```
+
+## LT vs LE
+```{r Differential gene expression analysis (Deseq2)}
+# without LFCThreshold, less stringent, but OK
+# change the variables accordingly
+results(dds_norm)
+
+# General threshold for significance in agricultural field
+alpha <- 0.05
+
+LT_vs_LE <-
+  results(
+    dds_norm,
+    #lfcThreshold = 1,
+    #altHypothesis = "greaterAbs",
+    contrast = c(
+      "group_genotype",
+      condizione_2,
+      condizione_1
+    ),
+    alpha = alpha)
+
+
+LT_vs_LE
+
+summary (LT_vs_LE)
+
+# Note: Setting `lfcThreshold = 1` changes the null hypothesis from "log2 fold change = 0"
+# (any change is significant) to "log2 fold change = 1", i.e., we are testing whether 
+# the gene expression has changed by **at least 2-fold** (since 2^1 = 2). 
+# This makes the test more stringent by requiring both statistical significance 
+# and a meaningful effect size. If not specified, DESeq2 tests for any change 
+# (even small ones), which can result in detecting genes with tiny, possibly 
+# biologically irrelevant fold changes.
+
+```
+
+## What's in the results table?
+```{r}
+mcols(LT_vs_LE, use.names = TRUE)
+```
+-   `baseMean`: mean of normalized counts for all samples
+-   `log2FoldChange`: log2 fold change
+-   `lfcSE`: standard error
+-   `stat`: Wald statistic
+-   `pvalue`: Wald test p-value
+-   `padj`: BH adjusted p-values
+
+## MA plot
+#Save the plot
+```{r}
+
+DESeq2::plotMA(LT_vs_LE, main = "LT_vs_LE")
+ggsave(filename = "MA_Plot_LT_vs_LE.pdf", device = "pdf", width = 10, height = 10, dpi = 300)
+
+```
+
+## Filtering of differentially expressed genes
+```{r}
+
+# Significant genes 
+# Adjust for fold change 
+
+# log fold change
+LOGFC <- 1
+
+LT_vs_LE_sigs <- subset(LT_vs_LE, padj < 0.05 & abs(log2FoldChange) > LOGFC)
+LT_vs_LE_sigs
+
+dim(LT_vs_LE_sigs)
+```
+
+## Save the S4x_vs_S2x results
+```{r LT_vs_LE results}
+# Export results
+write.csv(as.data.frame(LT_vs_LE),'LT_vs_LE_adj_Novel2.csv')
+write.csv(as.data.frame(LT_vs_LE_sigs),'LT_vs_LE_sigs_Novel2.csv')
+
+```
+
+## Save the LT vs LE results for futher downstream analysis
+```{r}
+
+# Convert to data frame and add row names as a column
+df <- as.data.frame(LT_vs_LE_sigs)
+df$gene_id <- rownames(df)
+
+# Optionally, you can put 'gene_id' as the first column
+df <- df[, c("gene_id", setdiff(names(df), "gene_id"))]
+
+# Save to CSV including the row names as a column
+readr::write_csv(
+  df,
+  file = file.path("out", "LT_vs_LE_sigs_novel_with_gene_2_ids.csv")
+)
+```

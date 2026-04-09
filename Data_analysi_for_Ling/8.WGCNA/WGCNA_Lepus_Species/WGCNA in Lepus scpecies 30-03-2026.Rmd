@@ -1,0 +1,1125 @@
+---
+title: "WGCNA analysis in Eragrostis curvula"
+author: "Cristian Andres Gallo, Jose Carballo & Danilo Fabrizio Santoro"
+date: "2025-04-12"
+output: 
+  html_document: 
+    code_download: true
+    df_print: default
+    fig_caption: yes
+    toc: yes
+    number_sections: true
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+    theme: spacelab
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Learning Objectives
+
+-   Understand the different steps involved in differential gene expression analysis using `DESeq2`.
+-   Execute the analysis pipeline with `DESeq2`.
+-   Generate exploratory and quality control plots for gene expression datasets.
+-   Obtain result tables with comparisons between experimental groups.
+
+## Introduction: Methods for Differential Gene Expression Analysis:
+
+Many methods have been developed for analyzing gene expression data, and new ones are continuously being published. However, only a few are widely recognized as best practices. Among them are packages like [**DESeq2**](https://bioconductor.org/packages/release/bioc/html/DESeq2.html) and [**EdgeR**](https://bioconductor.org/packages/release/bioc/html/edgeR.html). Both are well-established, rigorously tested, and come with extensive documentation and user manuals.
+
+[**Limma-Voom**](https://genomebiology.biomedcentral.com/articles/10.1186/gb-2014-15-2-r29) is another widely, which is generally recommended for datasets with a large number of replicates per group (\>20). This is because it may be less sensitive when applied to datasets with fewer replicates.
+
+In fact, numerous studies compare the performance and results of different methods, often highlighting variability in the outcomes.
+
+** Therefore, there is no single "best" method that universally outperforms all others. ([Soneson and Delorenzi, 2013](https://bmcbioinformatics.biomedcentral.com/articles/10.1186/1471-2105-14-91))**.
+
+![Figure 1.Flowchart of sequencing and assembly of Paspalum notatum leaf transcriptome](noref_pipeline.png)
+
+** In this tutorial, we will use [DESeq2](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-014-0550-8) for the analysis, as it is one of the most widely used and well-tested methods (which over 17,000 citations of the original paper...)**. `DESeq2` first normalizes count data to correct for factors such as differences in library size. The normalized expression values are then used to generate quality control plots.
+
+Finally, the **DESeq2** pipeline performs the necessary computations for differential expression analysis. In this tutorial, we will cover the main steps, but I encourage you to explore further and consult the [DESeq2 manual](http://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html) for additional details and useful information.
+
+# Gene Expression Analysis with `DESeq2`
+
+The final step of an RNA-seq experiment is typically differential expression analysis, which involves normalizing *raw counts* using an appropriate statistical model and performing a statistical test to identify differentially expressed genes. **At this stage, our main goal is to determine whether the average expression levels differ significantly between experimental groups**.
+
+
+## Dataset: RNAseq of *Eragrostis curvula*:
+
+-   ** 2 ** groups:
+
+    -   ** 2x **: diploid
+    -   ** 4x **: tetraploid
+    
+-   ** 2 ** types:
+
+    -   ** S **: sexual
+    -   ** A **: apomitic
+
+-   ** 10 ** genotypes:
+
+    -   ** victoria       **: 2x_sexual
+    -   ** ota            **: 4x_sexual
+    -   ** bahiense       **: 4x_apomitic
+    -   ** ermelo         **: 4x_apomitic
+    -   ** morpa          **: 4x_apomitic
+    -   ** tanganyikaINTA **: 4x_apomitic
+    -   ** tanganyikaUSDA **: 4x_apomitic
+    -   ** don_eduardo    **: 6x_apomitic
+    -   ** don_pablo      **: 7x_apomitic
+    -   ** don_juan       **: 8x_apomitic
+
+-   ** 1 ** tissue:
+
+    -   ** yl **: young leaves
+
+-   ** 3 ** biological replicates:
+
+    -   ** biological samples **: 3 biological replicates
+
+## Install and include necessary libraries
+```{r}
+source("src/env_setup.R")
+```
+
+## Load libraries
+```{r load libraries, warning=FALSE, message=FALSE}
+library(readr)
+library(DESeq2)
+library(pheatmap)
+library(ggplot2)
+library(RColorBrewer)
+library(ggrepel)
+library(GenomicFeatures)
+library(edgeR)
+library(limma)
+library(AnnotationDbi)
+library(WGCNA)
+library(readxl)
+library(CoExpNets)
+library(pheatmap)
+library(magrittr)
+library(ggrepel)
+library(dendextend)
+library(gridExtra)
+library(Biobase)
+library(tiff)
+# Set options
+options(stringsAsFactors = FALSE)
+```
+
+
+## Importing Expression Data
+
+# file Readcount.xls, sheet ="sheet1".
+
+The expression data, also known as "**raw counts**", are stored in the `csv` (*comma-separated value*) file `vv_counts.csv`. We can import this dataset using the `read.csv()` function.
+
+# Data importing of matrix:
+```{r import data_R}
+# Load data
+data <- read.table(file="in/Lepus_counts.txt", row.names = 1, header = TRUE);data
+
+head(data)
+tail(data)
+
+# Remove unwanted columns (adjust accordingly)
+data <- data[,]
+
+head(data)
+
+# log fold change
+LOGFC <- 2
+
+# General threshold for significance in agricultural field
+alpha <- 0.05
+
+```
+
+## Importing Sample Information (Metadata).
+o analyze the dataset properly, we also need to import the metadata associated with the samples. Metadata typically include details such as sample names, experimental conditions, and batch information, which are essential for downstream analyses.
+
+We can import the metadata from a CSV file using the ``read.csv()'` function.
+
+# Data importing of samples:
+```{r import samplemetadata}
+samplemetadata <- read.table("in/Leptus_metadata.txt", header = T);samplemetadata
+
+rownames(samplemetadata) <- samplemetadata$sampleName
+
+samplemetadata$group_genotype <- paste0(samplemetadata$group, "_", samplemetadata$ploidy)
+
+head(samplemetadata)
+
+```
+
+## Quality check - pre filtering
+# check for missing entries
+```{r check for missing entries}
+# this functions check if the data have too many missing values
+gsg <- goodSamplesGenes(t(data))
+gsg$allOK # if TRUE all msamples and genes has passed the QC
+summary(gsg$goodGenes)
+summary(gsg$goodSamples)
+
+### Dissection of transcriptional responses in Eragrostis curvula by RNA-Seq
+    # FALSE 3556   
+    # TRUE 54589 
+```
+
+# let's remove those genes that did not pass the QC
+```{r}
+filtered_data <- data[gsg$goodGenes == T,]
+```
+
+# exclude unsuited samples
+```{r}
+excluded_samples = c("")
+```
+
+## Filtering of low expressed genes
+
+remove genes with less than 10 reads in at least three samples
+```{r}
+km <- rowSums(filtered_data[, !colnames(filtered_data) %in% excluded_samples] >= 10) >= 3
+
+table(km)
+  #km
+  #FALSE  #TRUE 
+  #19149  #35440
+
+filtered_data <- filtered_data[km, !colnames(filtered_data) %in% excluded_samples]
+
+```
+
+## Data normalization using DESeq2
+
+# Creating a `DESeqDataSet` Object:
+
+To begin the analysis with `DESeq2`, three essential components are required:
+
+1.  A **count** table: This table **must** contain raw counts (recognizable as integer values). Rows represent genes (or transcripts), while columns correspond to different samples.
+
+2.  A table called **colData**: This table describes the samples and the experimental design, including relevant metadata.
+
+3.  A **formula**: This specifies the variable of interest in the analysis (e.g., treatment, genotype) along with any optional covariates (e.g., batch effects, temperature, etc.).
+
+Since we have already imported and stored these data in memory, we can use the `DESeqDataSetFromMatrix` function to create our dataset:
+
+> NOTE: in **R** a **`formula`** is indicated using the following special character: \~, known as "tilde".
+
+We chose median of ratios normalization instead of Variance Stabilizing Transformation (VST) method (https://hbctraining.github.io/DGE_workshop/lessons/02_DGE_count_normalization.html)
+```{r}
+# Create a `DESeqDataSet` object, normalize expression data
+# Load the filtered count data and sample metadata
+dds <- DESeqDataSetFromMatrix(countData = filtered_data, 
+                              colData = samplemetadata[!rownames(samplemetadata) %in% excluded_samples,], 
+                              design = ~ group_genotype)
+
+```
+
+## Filtering Lowly Expressed Genes
+
+As mentioned earlier, filtering out genes with very low expression is essential to ensure accurate quantification and improve the robustness of the differential expression analysis.
+
+We can visualize the distribution of raw counts before and after filtering to better understand how many lowly expressed genes are present in our dataset.
+
+Visualizing the Distribution of Raw Counts
+To examine the distribution of gene expression levels, we can use a histogram or boxplot.
+
+## Using a Boxplot to Visualize Expression Data Distributions
+```{r}
+head(assay(dds))
+```
+
+```{r}
+boxplot(assay(dds))
+```
+
+A **`boxplot`** is a useful way to explore the distribution of expression data in a `data.frame`. It helps visualize variability and potential outliers across samples.
+
+In RNA-seq data, the distributions are often dominated by a few highly expressed genes, while most genes have relatively low expression levels. This skewness can be mitigated by applying a log transformation.
+
+Since RNA-seq data are highly skewed, taking the `log transformation`. helps visualize the data more clearly. We typically use `log2` transformation (adding 1 to avoid log(0):
+
+This transformation reduces the impact of highly expressed genes, making it easier to compare the overall distributions across samples.
+```{r}
+boxplot(log2(assay(dds)))
+```
+
+### Analyzing the Distribution of Counts:
+
+To gain a deeper understanding of the expression data, we can examine the distribution of counts across samples using different visualization techniques. This helps identify potential biases, batch effects, or the presence of lowly expressed genes.
+```{r}
+# Check distributions of samples using boxplots
+boxplot(log2(assay(dds)), xlab = "", ylab = "Log2 counts per million", las = 2, main = "Raw counts Distributions")
+# Let's add a blue horizontal line that corresponds to the median values
+abline(h = median(log2(assay(dds))), col = "blue")
+```
+
+### Visualizing the Effect of Log Transformation with a Scatter Plot:
+
+A scatter plot is another useful way to observe how the log transformation affects RNA-seq count data. The raw counts are typically highly skewed, with a few genes having extremely high expression levels. Applying a log transformation makes the data more comparable and easier to interpret.
+```{r}
+plot(assay(dds)[,3:4])
+plot(log2(assay(dds)[,3:4]+1))
+```
+
+## `DESeq2` pipeline: Visualizing Dispersion Estimates in DESeq2
+
+Dispersion is a key parameter in RNA-seq differential expression analysis. It measures the variability of gene expression across replicates, helping DESeq2 account for biological and technical variation when estimating fold changes.
+```{r, cache=TRUE}
+
+# Run DESeq to estimate dispersions
+
+# Normalize and transform the data in the `DESeqDataSet` object using the  median of ratios method `DESeq()`
+dds_norm <- DESeq(dds)
+
+# Retrieve the normalized data from the `DESeqDataSet`-> Median of Ratios Method 
+normalized_counts <- counts(dds_norm, normalized=TRUE) %>% t() # Transpose normalized data for passing to WGCNA
+
+# Plot the dispersion estimates
+#plotDispEsts(dds, main = "Dispersion Estimates in DESeq2")
+
+```
+
+##    Parameters determination for WGCNA
+
+To identify which genes are in the same modules, WGCNA first creates a weighted network to define which genes are near each other. The measure of "adjacency" it uses is based on the correlation matrix, but requires the definition of a threshold value, which in turn depends on a "power" parameter that defines the exponent used when transforming the correlation values. The choice of power parameter will affect the number of modules identified, and the WGCNA modules provides the pickSoftThreshold() function to help identify good choices for this parameter.
+
+```{r}
+# Choose a soft-thresholding power for correlation matrix####
+powers <- c(c(1:20), seq(from = 22, to=50, by=2))
+sft <- pickSoftThreshold(normalized_counts, networkType = "signed", powerVector = powers)
+sft_df <- data.frame(sft$fitIndices) %>%
+  dplyr::mutate(model_fit = -sign(slope) * SFT.R.sq)
+```
+
+```{r}
+#plot the model fitting by the power soft threshold
+# Save the plot as a PNG file
+png('Scale Independence_novel.png',3000,3000,res=400)
+a1 <- ggplot(sft_df, aes(x = Power, y = model_fit, label = Power)) +
+# Plot the points
+  geom_point() +
+  # We'll put the Power labels slightly above the data points
+  geom_text(nudge_y = 0.1) +
+  # We will plot what WGCNA recommends as an R^2 cutoff
+  geom_hline(yintercept = 0.90, col = "green") +
+  geom_hline(yintercept = 0.80, col = "red", linetype = "dashed") +
+  # Just in case our values are low, we want to make sure we can still see the 0.80 level
+  ylim(c(min(sft_df$model_fit), 1.10)) +
+  # We can add more sensible labels for our axis
+  xlab("Soft Threshold (power)") +
+  ylab("Scale Free Topology Model Fit, signed R^2") +
+  ggtitle("Scale independence") +
+  # This adds some nicer aesthetics to our plot
+  theme_classic()
+
+#plot mean connectivity
+a2 <- ggplot(sft_df, aes(x = Power, y = mean.k., label = Power)) +
+  # Plot the points
+  geom_point() +
+  # We'll put the Power labels slightly above the data points
+  geom_text(nudge_y = 0.1) +
+  # We can add more sensible labels for our axis
+  xlab("Soft Threshold (power)") +
+  ylab("Mean connectivity") +
+  ggtitle("Mean connectivity plot") +
+  # This adds some nicer aesthetics to our plot
+  theme_classic()
+
+# Arrange the plots
+grid.arrange(a1, a2, nrow = 2)
+
+# Close the graphics device
+dev.off()
+```
+Using this plot we can decide on a power parameter. WGCNA's authors recommend using a power that has a signed R^2 above 0.80, otherwise they warn your results may be too noisy to be meaningful.
+![Figure 1.Scale of Independence of Medicago sativa leaf transcriptome](Scale Independence_novel.png)
+If you have multiple power values with signed R^2 above 0.80, then picking the one at an inflection point, in other words where the R^2 values seem to have reached their saturation (Zhang and Horvath 2005). You want to a power that gives you a big enough R^2 but is not excessively large.
+
+## RUN WGCNA
+blockwiseModules() function finds gene co-expression modules in WGCNA.
+
+This next step takes some time to run. The blockwise part of the blockwiseModules() function name refers to that these calculations will be done on chunks of your data at a time to help with conserving computing resources.
+
+The authors of WGCNA recommend running the largest block your computer can handle and they provide some approximations as to GB of memory of a laptop and what maxBlockSize it should be able to handle:
+
+• If the reader has access to a large workstation with more than 4 GB of memory, the parameter maxBlockSize can be increased. A 16GB workstation should handle up to 20000 probes; a 32GB workstation should handle perhaps 30000. A 4GB standard desktop or a laptop may handle up to 8000-10000 probes, depending on operating system and other running programs.
+
+---
+(Langfelder and Horvath 2016)
+---
+
+
+```{r}
+power_threshold=sft$powerEstimate # Power = 18 is a good choice because it achieves a scale-free topology with R² ≈ 0.9. Based on the previous picture, I'll use 19 as threshold value.
+#power_threshold <- 18
+MaxBS <- 20000 #change this to 5000 with 4GB RAM, 20000 with 16GB RAM, 30000 with 32GB RAM
+TOMtype <- "signed"
+#mergeCutHeight <- 0.25
+mergeCutHeight <- 0.35
+corType <- "pearson"
+deepSplit <- 2
+
+#create a subfolder to store the results from the current session
+
+filename <- paste0(format(Sys.time(), "%b_%e_%H.%M_%Y"),"corType_", corType,"_mCH", mergeCutHeight,"_pt", power_threshold, "deepSplit",deepSplit,"_wgcna")
+
+#find gene co-expression modules in WGCNA####
+# Perform the blockwiseModules analysis
+#cor <- WGCNA::cor
+bwnet <- blockwiseModules(normalized_counts, # he input data for the WGCNA analysis, typically a matrix of normalized gene expression values where rows represent genes and columns represent samples. Ensure this is preprocessed and log-transformed as needed.
+                          maxBlockSize = MaxBS, # Specifies the maximum number of genes in a single block or chunk during the analysis. Use a size compatible with your system’s RAM.
+                          minModuleSize = 30, # The minimum number of genes required for a module to be considered valid.Small modules may be less biologically relevant, so this parameter sets a lower limit on module size.
+                          deepSplit = deepSplit,# Controls the sensitivity of module detection (how finely the dendrogram is cut into modules). So, deepSplit = 2 balances sensitivity (finer splitting) and biological relevance.
+                          networkType = "signed", # Specifies the type of co-expression network to construct. "signed": More biologically meaningful since gene expression modules often represent co-regulated genes with positively correlated expression patterns.
+                          TOMType = TOMtype, # Specifies the type of Topological Overlap Matrix (TOM) to calculate. Value equal to "signed" for signed networks (matches the networkType).
+                          power = power_threshold, # Sets the soft-thresholding power for network construction. Higher values increase the emphasis on strong correlations while suppressing weak ones. Typically determined using the pickSoftThreshold function, aiming for a scale-free topology (R² ~ 0.9).
+                          mergeCutHeight = mergeCutHeight, # Determines the threshold for merging modules based on the similarity of their eigengenes.Higher values result in fewer merged modules, while lower values lead to more merging. 0.25 is a standard choice.
+                          corType = "pearson",  # Specifies the type of correlation to use. "pearson": It is the standard for gene co-expression analyses unless outliers are a concern.
+                          numericLabels = TRUE, # Determines how module labels are assigned. TRUE: Numeric labels simplify downstream analyses and automation.
+                          saveTOMs = TRUE, # Whether to save the calculated TOM matrices for future use.
+                          verbose = 3, # Controls the level of detail printed to the console during execution. 3: Detailed output (recommended for debugging and monitoring).
+                          saveTOMFileBase = 'out/TOM', #  Specifies the base filename for saved TOM matrices. If set to 'out/TOM', TOM matrices will be saved as files like out/TOM-block1.RData.
+                          randomSeed = 42, # there's some randomness associated with this calculation so we should set a seed. Setting randomSeed = 42 ensures that your results are replicable.
+)
+#cor<- stats::cor
+
+# unsigned -> nodes with positive & negative correlation are treated equally 
+# signed -> nodes with negative correlation are considered *unconnected*, treated as zero
+# Relabel module colors
+dynamicColors = labels2colors(bwnet$colors)  # Before merging
+length(dynamicColors)
+mergedColors = dynamicColors  # To avoid confusion, use the mergedColors later.
+
+sizeGrWindow(12, 9)
+pdf(file = "4-module_tree_blockwise2.pdf", width = 8, height = 6)
+plotDendroAndColors(bwnet$dendrograms[[1]], mergedColors[bwnet$blockGenes[[1]]],
+                    "Module colors",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+dev.off()
+```
+# Save RDS file in case we want to return to our original WGCNA results.
+```{r}
+save(bwnet, file= "WGCNA_30_11_24.Rdata")
+```
+
+# Load file
+```{r}
+load("WGCNA_30_11_24.Rdata")
+```
+
+# Plot genes number in the different modules
+```{r}
+
+pdf(file = "plot_genes_in_modules.pdf", width = 20, height = 10)
+GenModPlot <- plot_genes_in_modules(bwnet)
+dev.off()
+```
+
+# Perform k-means clustering of genes (https://doi.org/10.1186/s12918-017-0420-6)
+```{r}
+#for compatibility reasons with CoExpNets, change name from bwnet$colors to bwnet$moduleColors
+names(bwnet)[names(bwnet) == "colors"] <- "moduleColors"
+
+bwnet_km <- CoExpNets::applyKMeans( net.file = bwnet,
+                                    expr.data = normalized_counts
+)
+
+#restore original name and change also bwnet_km
+names(bwnet)[names(bwnet) == "moduleColors"] <- "colors"
+names(bwnet_km)[names(bwnet_km) == "moduleColors"] <- "colors"
+#paste0("out/",filename, "kmean_results.RDS")
+```
+#
+```{r}
+pdf(file = "plot_genes_in_modules_2.pdf", width = 20, height = 10)
+GenModPlotKm <- plot_genes_in_modules_km(bwnet_km)
+dev.off()
+```
+
+
+
+####### Save genes
+
+# export table of genes with correspondent module
+```{r}
+#get genes in the modules
+gene_module_key <- tibble::enframe(bwnet$colors, name = "gene", value = "module") %>%
+  # add the `ME` part so its more clear what these numbers are and it matches elsewhere
+  dplyr::mutate(module = paste0("ME", module))
+
+#save it for future use
+readr::write_tsv(gene_module_key,
+                 file = file.path("out", paste0(filename,"_wgcna_gene_to_module.tsv"))
+)
+
+readr::write_tsv(tibble::enframe(bwnet_km$colors, name = "gene", value = "module"),
+                 file = file.path("out", paste0(filename,"_wgcna_km_gene_to_module.tsv"))
+)
+```
+
+#######
+
+# WGCNA exploration
+# Let's take a look at the modules
+
+Hierarchical cluster tree (average linkage, dissTOM) of the genes. The color bands provide a simple visual comparison of module assignments (branch cuttings) based on the dynamic hybrid branch cutting method.
+```{r}
+pdf(file = "4-module_tree_blockwise_adjusted.pdf", width = 8, height = 6)
+# Convert labels to colors for plotting
+mergedColors = labels2colors(bwnet$colors)
+# Plot the dendrogram and the module colors underneath
+plotDendroAndColors(
+  bwnet$dendrograms[[1]],
+  mergedColors[bwnet$blockGenes[[1]]],
+  "Module colors",
+  dendroLabels = FALSE,
+  hang = 0.03,
+  addGuide = TRUE,
+  guideHang = 0.05 )
+dev.off()
+```
+# In bwnet we have a data frame of eigengene module data for each sample in the MEs slot. These represent the collapsed, combined, and normalized expression of the genes that make up each module.
+
+# Stage I
+```{r}
+#collapsed, combined, and normalized expression (eigenvlues) of the genes that make up each module.
+module_eigengenes <- bwnet$MEs
+module_eigengenes_km <- bwnet_km$MEs
+head(module_eigengenes)
+head(module_eigengenes_km)
+```
+# Stage II
+```{r}
+module_eigengenes <- orderMEs(module_eigengenes)
+module_eigengenes_km <- orderMEs(module_eigengenes_km)
+# Plot the relationships among the eigengenes and the trait 
+plotEigengeneNetworks(module_eigengenes,
+                      "",
+                      marDendro=c(0,4,1,2), 
+                      marHeatmap=c(3,4,1,2),
+                      cex.lab=0.8,
+                      xLabelsAngle=90)
+
+plotEigengeneNetworks(module_eigengenes_km,
+                      "",
+                      marDendro=c(0,4,1,2), 
+                      marHeatmap=c(3,4,1,2),
+                      cex.lab=0.8,
+                      xLabelsAngle=90)
+```
+# Module-phenotypes correlations
+
+Correlate eigengenes to continuous variables
+
+here we are using pearson correlation
+
+# Stage III
+```{.r}
+#read traits table
+Traits <- read.table("in/traits.csv", sep=";", header = T, row.names = 1) 
+
+#define number of genes and samples
+nSamples = nrow(Traits[!rownames(Traits) %in% excluded_samples,])
+nGenes = ncol(normalized_counts)
+
+module.trait.corr <- cor(module_eigengenes_km, Traits[!rownames(Traits) %in% excluded_samples,],
+                         method = "p") #change the method based on your data
+module.trait.corr.pvals <- corPvalueStudent(module.trait.corr, nSamples)
+```
+
+# Stage IV
+```{.r}
+pdf(file = "Module-phenotypes_correlations.pdf", width = 20, height = 20)
+# Will display correlations and their p-values
+textMatrix =  paste(signif(module.trait.corr, 2), "\n(",
+                    signif(module.trait.corr.pvals, 1), ")", sep = "");
+dim(textMatrix) = dim(module.trait.corr)
+par(mar = c(6, 8.5, 3, 3));
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = module.trait.corr,
+               xLabels = colnames(Traits),
+               yLabels = names(moduleEigengenes(normalized_counts, bwnet_km$colors)$eigengenes),
+               ySymbols = names(moduleEigengenes(normalized_counts, bwnet_km$colors)$eigengenes),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(50),
+               textMatrix = textMatrix,
+               setStdMargins = FALSE,
+               cex.text = 0.5,
+               zlim = c(-1,1),
+               main = paste("Module-trait relationships"))
+dev.off()
+```
+# Correlate eigengenes to categorical variables using pearson correlation coefficient*
+
+*This may be seem aberrant to mathematicians. Does use of Pearson correlation to correlate categorical variables to eigengenes (continuous variable)? The idea is that we are looking for modules with are ASSOCIATED, rather than correlated, with the traits of interest. Student t-test or linear model would bring to the same result. (see below)
+```{r}
+pdf(file = "Eureka_Lepus_3.pdf", width = 20, height = 20)
+#set the reference value as the first level
+#metadata$Ploidy <- factor(metadata$Ploidy, levels = c("2x", "4x"))
+#metadata$treatment <- factor(metadata$treatment, levels = c("untreated", "treated"))
+#metadata <- mutate(metadata, condition = paste0(Ploidy, "_", treatment))
+#metadata$Zone <- factor(metadata$Zone, levels = c("4x_untreated", "2x_untreated", "4x_treated", "2x_treated"))
+
+metadata <- read.table("in/Leptus_metadata.txt", header = T);metadata
+#rownames(metadata) <- metadata$sampleName
+#metadata$group_genotype <- paste0(metadata$group, "_", metadata$ploidy)
+#head(metadata)
+
+#samplemetadata <- read.table("in/Mimmo_WGCNA.txt", header = T);samplemetadata
+#rownames(samplemetadata) <- samplemetadata$sampleName
+#samplemetadata$group_genotype <- paste0(samplemetadata$group, "_", samplemetadata$ploidy)
+#head(samplemetadata)
+
+
+metadata$genotype <- factor(metadata$genotype, levels = c("Lepus_europaeus_LE_REF", "Lepus_timidus_LE_REF", "Lepus_europaeus_LT_REF", "Lepus_timidus_LT_REF"))
+
+#metadata$genotype <- factor(metadata$genotype, levels = c("victoria", "ota", "don_eduardo", "don_pablo", "don_juan", "APO"))
+
+#metadata$genotype <- factor(metadata$genotype, levels = c("2x_2x", "4x_4x", "6x_6x", "7x_7x", "8x_8x"))
+
+#binarize categorical variable
+#Ploidy <- binarizeCategoricalColumns(metadata$Ploidy, #we are looking at association with maternal mutation
+                           #includePairwise = T,
+                           #includeLevelVsAll = F,
+                           #minCount = 1)
+#colnames(Ploidy) <- c("ploidy effect")
+
+#treatment <- binarizeCategoricalColumns(metadata$treatment, #we are looking at association with maternal ploidy
+                           #includePairwise = T,
+                           #includeLevelVsAll = F,
+                           #minCount = 1)
+#colnames(treatment) <- c("treatment effect")
+
+condition <- binarizeCategoricalColumns(metadata$genotype, #we are looking at association with paternal ploidy
+                           includePairwise = T,
+                           includeLevelVsAll = F,
+                           minCount = 1)
+
+
+#traits <- cbind(condition[,c(1,2,3,4,5)])
+#traits <- cbind(condition[,c(1,10,11,12,13,14)])
+#traits <- cbind(condition[,c(7, 8, 9)])
+#traits <- cbind(condition[,c(13,14)])
+#traits <- cbind(condition[,c()])
+#traits <- cbind(condition[,c(5,9,12, 14,15)])
+
+traits <- cbind(condition[,c(1,6)])
+
+rownames(traits) <- rownames(metadata)
+rownames(module_eigengenes_km) <- rownames(metadata)
+
+#define number of genes and samples
+nSamples = nrow(normalized_counts[!rownames(normalized_counts) %in% excluded_samples,])
+nGenes = ncol(normalized_counts)
+
+module.trait.corr <- cor(module_eigengenes_km, traits[!rownames(traits) %in% excluded_samples,],
+                         use = "pairwise.complete.obs",
+                         method = "p") #change the method based on your data
+module.trait.corr.pvals <- corPvalueStudent(module.trait.corr, nSamples)
+
+#visualize module-trait association
+#heatmap.data <- merge(module_eigengenes_km, traits[!rownames(traits) %in% excluded_samples,], by = "row.names")
+
+
+heatmap.data <- merge(module_eigengenes_km, traits[!rownames(traits) %in% excluded_samples, , drop =FALSE], by = "row.names")
+
+#traits$SampleID <- rownames(traits)  # Aggiungi una colonna esplicita con i nomi delle righe
+#module_eigengenes_km$SampleID <- rownames(module_eigengenes_km)  # Stessa cosa per gli eigengenes
+
+rownames(heatmap.data) <- heatmap.data$Row.names
+heatmap.data$Row.names <- NULL
+head(heatmap.data)
+
+
+#CorLevelPlot(heatmap.data,
+             #x = names(heatmap.data)[38:41],
+             #y = names(heatmap.data)[1:37],
+             #col = c("blue1", "skyblue", "white", "pink", "red"))
+
+
+CorLevelPlot(heatmap.data,
+             x = names(heatmap.data)[21:22],
+             y = names(heatmap.data)[1:20],
+             col = c("forestgreen", "palegreen", "white", "pink", "red"),
+  # ▼ make the numbers and labels larger
+  cexCorval   = 1.9,   # numbers inside the cells
+  fontCorval  = 2,     # (1=plain, 2=bold, 3=italic, 4=bold-italic)
+  cexLabX     = 2.0,   # x-axis labels
+  cexLabY     = 2.0,   # y-axis labels (45 rows → don’t go too large or they’ll overlap)
+  #rotLabX     = 45,    # angle x labels to fit better
+  rotLabX     = 0,    # angle x labels to fit better
+  # ▼ title / legend sizes (optional)
+  main        = "Module–trait correlations",
+  cexMain     = 3.0,
+  #titleX      = "Contrasts",   cexTitleX = 2.0,
+  #titleY      = "Modules",     cexTitleY = 2.0,
+  cexLabColKey = 2.0,          # legend tick labels
+  #fontLabColKey = 2,   # ← bold legend tick labels
+  posColKey   = "right"
+  )
+
+
+#CorLevelPlot(heatmap.data,
+             #x = names(heatmap.data)[50:55],
+             #y = names(heatmap.data)[1:49],
+             #col = c("blue1", "skyblue", "white", "pink", "red"))
+
+
+
+dev.off()
+```
+
+#
+```{r}
+# Define Gene Significance (GS) and Module Membership (MM)
+# Use normalized_counts and metadata for alignment
+nSamples <- nrow(normalized_counts)
+moduleColors <- bwnet_km$colors  # Adjust if module colors are from another source
+MEs <- bwnet_km$MEs  # Module eigengenes
+
+# Ensure metadata and expression data are aligned
+metadata <- metadata[match(rownames(normalized_counts), rownames(metadata)), ]
+
+# Calculate Gene Significance (GS) with respect to a specific trait
+#trait <- metadata$Zone  # Replace 'TraitVariable' with your variable of interest
+GS <- cor(normalized_counts, traits, use = 'pairwise.complete.obs')
+GS_pvalues <- corPvalueStudent(GS, nSamples)
+
+# Calculate Module Membership (MM)
+MM <- cor(normalized_counts, MEs, use = 'pairwise.complete.obs')
+MM_pvalues <- corPvalueStudent(MM, nSamples)
+
+write.csv(GS, "GS.csv")
+write.csv(GS_pvalues, "GS_pvalues.csv")
+write.csv(MM, "MM.csv")
+write.csv(MM_pvalues, "MM_pvalues.csv")
+
+# Compile the results into a data frame
+#geneInfo <- data.frame(
+  #GeneID = rownames(normalized_counts),
+  #ModuleColor = moduleColors,
+  #GS = GS,
+  #GS_pvalues = GS_pvalues,
+  #MM = MM,
+  #MM_pvalues = MM_pvalues)
+
+# Save the results
+#write.csv(geneInfo, file = "Gene_Significance_and_Module_Membership.csv", row.names = FALSE)
+
+```
+
+# Scatterplot representing the GS and MM of modules
+# 1st trial
+```{.r}
+pdf(file = "Scatterplot.pdf", width = 8, height = 8)
+# calculate the module membership values
+#datKME=signedKME(normalized_counts, moduleEigengenes(normalized_counts, bwnet_km$colors)$eigengenes)
+
+# Next use this trait to define a gene significance variable 
+#GS.viab=as.numeric(cor(normalized_counts, metadata[!rownames(metadata) %in% excluded_samples, "Zone"], use="p"))
+
+
+
+selectModule <- c("lightyellow", "blue")
+
+for(module in selectModule){
+  for (cfr in colnames(GS)){
+    verboseScatterplot(MM[,paste0("ME", module)], GS[, cfr], xlab=paste("Module Membership", module, "module"),
+     ylab=paste("GS", cfr),
+     main="MM vs. GS",
+    col = module)
+  }
+}
+
+dev.off()
+
+```
+
+# 2nd trial
+```{.r}
+library(ggplot2)
+
+selectModule <- c("lightyellow", "blue")
+
+# Loop through selected modules and GS columns
+for (module in selectModule) {
+  for (cfr in colnames(GS)) {
+    # Create a data frame for ggplot
+    df <- data.frame(MM = MM[, paste0("ME", module)], GS = GS[, cfr])
+    
+    # Generate scatterplot with enhancements
+    p <- ggplot(df, aes(x = MM, y = GS)) +
+      stat_density_2d(aes(fill = ..level..), geom = "polygon", alpha = 0.4) +
+      geom_point(color = module, alpha = 0.6) +
+      scale_fill_viridis_c(option = "C") +
+      geom_smooth(method = "lm", color = "red", linetype = "dashed") +
+      labs(
+        x = paste("Module Membership:", module, "module"),
+        y = paste("Gene Significance:", cfr),
+        title = paste("MM vs. GS for", module, "module")
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(hjust = 0.5),
+        legend.position = "right"
+      )
+    
+    # Save or print the plot
+    print(p)
+  }
+}
+
+```
+
+# 3th trial
+```{.r}
+pdf(file = "Scatterplot2.pdf", width = 8, height = 8)
+library(ggplot2)
+
+selectModule <- c("lightyellow", "blue")
+
+# Loop through selected modules and GS columns
+for (module in selectModule) {
+  for (cfr in colnames(GS)) {
+    # Create a data frame for ggplot
+    df <- data.frame(MM = MM[, paste0("ME", module)], GS = GS[, cfr])
+    
+    # Calculate correlation and p-value
+    cor_result <- cor.test(df$MM, df$GS)
+    cor_value <- round(cor_result$estimate, 2)
+    p_value <- format(cor_result$p.value, scientific = TRUE, digits = 2)
+    
+    # Generate scatterplot with enhancements
+    p <- ggplot(df, aes(x = MM, y = GS)) +
+      stat_density_2d(aes(fill = ..level..), geom = "polygon", alpha = 0.4) +
+      geom_point(color = module, alpha = 0.6) +
+      scale_fill_viridis_c(option = "C") +
+      geom_smooth(method = "lm", color = "red", linetype = "dashed") +
+      labs(
+        x = paste("Module Membership:", module, "module"),
+        y = paste("Gene Significance:", cfr),
+        title = paste0(
+          "MM vs. GS for ", module, " module\n",
+          "cor=", cor_value, ", p=", p_value
+        )
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(hjust = 0.5, size = 14),
+        legend.position = "right"
+      )
+    
+    # Save or print the plot
+    print(p)
+  }
+}
+dev.off()
+```
+
+# 4th trial
+```{r}
+pdf(file = "Scatterplot2.pdf", width = 8, height = 8)
+library(ggplot2)
+
+selectModule <- c("skyblue3","darkorange","violet", "saddlebrown","yellow","yellowgreen","steelblue","red","darkred","darkgreen","tan","blue","lightyellow")
+
+# Loop through selected modules and GS columns
+for (module in selectModule) {
+  for (cfr in colnames(GS)) {
+    # Create a data frame for ggplot
+    df <- data.frame(MM = MM[, paste0("ME", module)], GS = GS[, cfr])
+    
+    # Calculate correlation and p-value
+    cor_result <- cor.test(df$MM, df$GS)
+    cor_value <- round(cor_result$estimate, 2)
+    p_value <- ifelse(cor_result$p.value < 2.2e-16, "<2.2e-16", 
+                      format(cor_result$p.value, scientific = TRUE, digits = 2))
+    
+    # Generate scatterplot with enhancements
+    p <- ggplot(df, aes(x = MM, y = GS)) +
+      stat_density_2d(aes(fill = ..level..), geom = "polygon", alpha = 0.4) +
+      geom_point(color = module, alpha = 0.6) +
+      scale_fill_viridis_c(option = "C") +
+      geom_smooth(method = "lm", color = "red", linetype = "dashed") +
+      labs(
+        x = paste("Module Membership:", module, "module"),
+        y = paste("Gene Significance:", cfr),
+        title = paste0(
+          "MM vs. GS for ", module, " module\n",
+          "cor=", cor_value, ", p=", p_value
+        )
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(hjust = 0.5, size = 14),
+        legend.position = "right"
+      )
+    
+    # Save or print the plot
+    print(p)
+  }
+}
+dev.off()
+```
+
+# Flavio
+```{r}
+# ------------------------------------------------------------
+# Friend-style "extra plots" + gene lists (integrated with your objects)
+# Requires: normalized_counts (samples x genes), bwnet, bwnet_km, metadata
+# ------------------------------------------------------------
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(WGCNA)
+
+# 0) Sanity checks (important for avoiding silent misalignment)
+stopifnot(all(rownames(normalized_counts) %in% rownames(samplemetadata)))
+stopifnot(all(colnames(normalized_counts) %in% names(bwnet_km$colors)))
+
+# Remove excluded samples consistently (if you use them)
+keep_samp <- !(rownames(normalized_counts) %in% excluded_samples)
+datExpr_use <- normalized_counts[keep_samp, , drop = FALSE]
+
+# ------------------------------------------------------------
+# 1) Gene -> module table (use KM-corrected modules)
+# ------------------------------------------------------------
+module_df <- data.frame(
+  gene_id = names(bwnet_km$colors),
+  module  = labels2colors(bwnet_km$colors),
+  stringsAsFactors = FALSE
+)
+
+# Optional: quick view
+print(head(module_df))
+print(table(module_df$module))
+
+# Save if you want
+write.csv(module_df, "Gene_to_module_colors_KM.csv", row.names = FALSE)
+
+# ------------------------------------------------------------
+# 2) Dendrogram + module colors (highlighted plot in your friend's message)
+#    NOTE: uses the dendrogram from bwnet (structure) + KM colors for display
+# ------------------------------------------------------------
+mergedColors_km <- module_df$module
+names(mergedColors_km) <- module_df$gene_id
+
+pdf("FriendPlot_Dendrogram_Modules_KMcolors.pdf", width = 16, height = 10)
+plotDendroAndColors(
+  bwnet$dendrograms[[1]],
+  mergedColors_km[bwnet$blockGenes[[1]]],
+  "Module colors (KM-corrected)",
+  dendroLabels = FALSE,
+  hang = 0.03,
+  addGuide = TRUE,
+  guideHang = 0.05
+)
+dev.off()
+
+# ------------------------------------------------------------
+# 3) Eigengene-by-sample heatmap (THIS is what your friend's ggplot was doing)
+#    It's NOT correlations: it's eigengene values across samples
+# ------------------------------------------------------------
+MEs_plot <- orderMEs(bwnet_km$MEs)
+MEs_plot$sample_id <- rownames(MEs_plot)
+
+module_order <- gsub("^ME", "", names(MEs_plot)[grepl("^ME", names(MEs_plot))])
+
+mME <- MEs_plot %>%
+  pivot_longer(cols = starts_with("ME"), names_to = "module", values_to = "eigengene") %>%
+  mutate(
+    module = gsub("^ME", "", module),
+    module = factor(module, levels = module_order)
+  )
+
+pdf("FriendPlot_EigengeneTileHeatmap.pdf", width = 14, height = 8)
+ggplot(mME, aes(x = sample_id, y = module, fill = eigengene)) +
+  geom_tile() +
+  theme_bw() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
+                       midpoint = 0, limits = c(-1, 1)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  labs(title = "Module eigengenes across samples (KM-corrected)",
+       x = "Samples", y = "Modules", fill = "ME value")
+dev.off()
+
+# ------------------------------------------------------------
+# 4) Plot expression profiles of genes in selected modules (friend’s subexpr plot)
+#    IMPORTANT: in your analysis normalized_counts is samples x genes,
+#    so gene subsetting is by COLUMNS, not rows.
+# ------------------------------------------------------------
+modules_of_interest <- c("pink","lightcyan", "darkturquoise", "yellow","red", "purple")   # <- change these as you like
+
+submod <- module_df %>% filter(module %in% modules_of_interest)
+
+# If none found, stop gracefully
+if (nrow(submod) == 0) {
+  message("No genes found for modules: ", paste(modules_of_interest, collapse = ", "))
+} else {
+
+  # subset expression matrix by genes (COLUMNS!)
+  subexpr <- datExpr_use[, submod$gene_id, drop = FALSE]  # samples x selected_genes
+
+  submod_df <- as.data.frame(subexpr) %>%
+    mutate(sample_id = rownames(.)) %>%
+    pivot_longer(cols = -sample_id, names_to = "gene_id", values_to = "value") %>%
+    left_join(submod, by = "gene_id")
+
+  pdf("Flavio.pdf", width = 14, height = 10)
+  ggplot(submod_df, aes(x = sort(submod_df$sample_id), y = value, group = gene_id, color = module)) +
+    geom_line(alpha = 0.35) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+    facet_grid(rows = vars(module), scales = "free_y") +
+    labs(x = "Samples", y = "Normalized expression",
+         title = "Expression profiles of genes in selected modules (KM-corrected)")
+  dev.off()
+
+  # Example: extract pink genes
+  expressed_in_pistils <- unique(submod_df$gene_id[submod_df$module == "pink"])
+  writeLines(expressed_in_pistils, "Genes_in_pink_module.txt")
+  # Example: extract lightcyan genes
+  expressed_in_pistils <- unique(submod_df$gene_id[submod_df$module == "lightcyan"])
+  writeLines(expressed_in_pistils, "Genes_in_lightcyan_module.txt")
+  # Example: extract darkturquoise genes
+  expressed_in_pistils <- unique(submod_df$gene_id[submod_df$module == "darkturquoise"])
+  writeLines(expressed_in_pistils, "Genes_in_darkturquoise_module.txt")
+  # Example: extract yellow genes
+  expressed_in_pistils <- unique(submod_df$gene_id[submod_df$module == "yellow"])
+  writeLines(expressed_in_pistils, "Genes_in_yellow_module.txt")ù
+  # Example: extract red genes
+  expressed_in_pistils <- unique(submod_df$gene_id[submod_df$module == "red"])
+  writeLines(expressed_in_pistils, "Genes_in_yellow_module.txt")
+  # Example: extract purple genes
+  expressed_in_pistils <- unique(submod_df$gene_id[submod_df$module == "purple"])
+  writeLines(expressed_in_pistils, "Genes_in_yellow_module.txt")
+}
+
+```
+
+# Version 1: ordered by genotype, zone, and replicate (if available in metadata):
+```{r}
+pdf("Flavio5.pdf", width = 14, height = 10)
+
+ordered_submod_df <- submod_df %>%
+  left_join(
+    metadata %>%
+      dplyr::select(sample_ID, Genotype, Zone, Replicate),
+    by = c("sample_id" = "sample_ID")
+  ) %>%
+  mutate(
+    Genotype = factor(
+      Genotype,
+      levels = c("Lepus_europaeus", "Lepus_timidus")
+    ),
+    Zone = factor(
+      Zone,
+      levels = c(
+        "Lepus_europaeus_LE_REF",
+        "Lepus_timidus_LE_REF",
+        "Lepus_europaeus_LT_REF",
+        "Lepus_timidus_LT_REF"
+      )
+    ),
+    Replicate = as.numeric(Replicate)
+  ) %>%
+  arrange(Genotype, Zone, Replicate) %>%
+  mutate(sample_id = factor(sample_id, levels = unique(sample_id)))
+
+ggplot(
+  ordered_submod_df,
+  aes(x = sample_id, y = value, group = gene_id, color = module)
+) +
+  geom_line(alpha = 0.35) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  facet_grid(rows = vars(module), scales = "free_y") +
+  labs(
+    x = "Samples",
+    y = "Normalized expression",
+    title = "Expression profiles of genes in selected modules (KM-corrected)"
+  )
+
+dev.off()
+
+
+```
+
+
+# Version 2: ordered by reference type (LE vs LT), then by genotype (Lepus europaeus vs Lepus timidus), and finally by replicate (if available in metadata):
+```{r}
+pdf("Flavio5.pdf", width = 14, height = 10)
+
+ordered_submod_df <- submod_df %>%
+  left_join(
+    metadata %>%
+      dplyr::select(sample_ID, Genotype, Zone, Replicate),
+    by = c("sample_id" = "sample_ID")
+  ) %>%
+  mutate(
+    ref_type = ifelse(grepl("_LE$", sample_id), "LE", "LT"),
+    sample_group = ifelse(grepl("^LE", sample_id), "LE", "LT"),
+    ref_type = factor(ref_type, levels = c("LE", "LT")),
+    sample_group = factor(sample_group, levels = c("LE", "LT")),
+    Replicate = as.numeric(Replicate)
+  ) %>%
+  arrange(ref_type, sample_group, Replicate) %>%
+  mutate(sample_id = factor(sample_id, levels = unique(sample_id)))
+
+ggplot(
+  ordered_submod_df,
+  aes(x = sample_id, y = value, group = gene_id, color = module)
+) +
+  geom_line(alpha = 0.35) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  facet_grid(rows = vars(module), scales = "free_y") +
+  labs(
+    x = "Samples",
+    y = "Normalized expression",
+    title = "Expression profiles of genes in selected modules (KM-corrected)"
+  )
+
+dev.off()
+```
+
+# Version 3: Same order  
+```{r}
+pdf("Flavio5.pdf", width = 14, height = 10)
+
+sample_order <- c(
+  "LE4A_LE", "LE3A_LE", "LE2A_LE", "LE1A_LE",
+  "LT6A_LE", "LT5A_LE", "LT4A_LE", "LT1A_LE",
+  "LE4A_LT", "LE3A_LT", "LE2A_LT", "LE1A_LT",
+  "LT6A_LT", "LT5A_LT", "LT4A_LT", "LT1A_LT"
+)
+
+ordered_submod_df <- submod_df %>%
+  mutate(sample_id = factor(sample_id, levels = sample_order))
+
+ggplot(
+  ordered_submod_df,
+  aes(x = sample_id, y = value, group = gene_id, color = module)
+) +
+  geom_line(alpha = 0.35) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  facet_grid(rows = vars(module), scales = "free_y") +
+  labs(
+    x = "Samples",
+    y = "Normalized expression",
+    title = "Expression profiles of genes in selected modules (KM-corrected)"
+  )
+
+dev.off()
+```
+

@@ -1,0 +1,458 @@
+# --------------------------------------------
+# src/script/stability.R   (NO permutation)
+# --------------------------------------------
+# PURPOSE
+#   Robustness diagnostics for a SWIM-style correlation network using:
+#     - genotype-centered expression (removes genotype baselines)
+#     - shrinkage correlations (optional; James–Stein via corpcor)
+#     - two resampling schemes:
+#         1) Leave-One-Out (LOO): remove one library at a time
+#         2) Stratified 80% subsampling: per-genotype sampling, repeated n_subsamples times
+#   For each run, a network is rebuilt with the same thresholds used in the full run.
+#   Metrics per run: Edge Jaccard (edge overlap vs full network), Module ARI (k-means),
+#                    and Switch recovery (fraction of full-run switches recovered).
+#   Exports:
+#     - robustness/Robustness_Runs_Detail.csv        (row per run)
+#     - robustness/Supplementary_Robustness_Summary.csv (mean ± SD by run_type)
+#     - robustness/Supplementary_Fig_Robustness.pdf  (boxplots)
+#     - robustness/Supplementary_Consensus_Switches.csv (switches in ≥50% runs)
+#
+# INPUTS
+#   data            : numeric matrix/data.frame (genes x samples) already filtered
+#   input_parameter : list with fields:
+#       $path, $correction_method, $type_correlation,
+#       $threshold_prc_corr, $threshold_pval_adj_corr,
+#       $num_clusters, $iter_max, $num_repeats
+#   input_file      : list with fields:
+#       $control, $case, optional $metadata (cols: sample, ploidy, genotype)
+#
+# NOTES
+#   - Code body is kept IDENTICAL to your working version; only comments were added.
+#   - Set use_shrinkage = TRUE to use James–Stein shrinkage correlations (recommended for small n).
+# --------------------------------------------
+
+suppressPackageStartupMessages({
+  library(Hmisc)       # rcorr
+  library(igraph)
+  library(data.table)
+  library(mclust)      # adjustedRandIndex
+  library(corpcor)     # optional shrinkage correlation
+})
+
+run_stability <- function(data,
+                          input_parameter,
+                          input_file,
+                          n_subsamples = 100,
+                          frac_keep = 0.8,
+                          use_shrinkage = TRUE,
+                          seed = 123) {
+  
+  set.seed(seed)
+  
+  # -----------------------------
+  # Output paths (results saved under <path>/robustness)
+  # -----------------------------
+  
+  outdir <- file.path(input_parameter$path, "robustness")
+  if (!dir.exists(outdir)) dir.create(outdir, recursive = TRUE)
+  
+  file_detail   <- file.path(outdir, "Robustness_Runs_Detail.csv")
+  file_summary  <- file.path(outdir, "Supplementary_Robustness_Summary.csv")
+  file_fig      <- file.path(outdir, "Supplementary_Fig_Robustness.pdf")
+  file_cons_sw  <- file.path(outdir, "Supplementary_Consensus_Switches.csv")
+  
+  # -----------------------------
+  # Metadata + genotype centering (removes genotype baselines)
+  # -----------------------------
+  samples <- colnames(data)
+  
+  if (!is.null(input_file$metadata)) {
+    meta <- input_file$metadata
+    stopifnot(all(samples %in% meta$sample))
+    meta <- meta[match(samples, meta$sample), ]
+    stopifnot(all(c("sample","ploidy","genotype") %in% colnames(meta)))
+  } else {
+    ploidy <- ifelse(samples %in% input_file$control, "Diploid",
+                     ifelse(samples %in% input_file$case, "Tetraploid", NA))
+    if (any(is.na(ploidy)))
+      stop("Alcuni campioni non sono in control né in case.")
+    geno_guess <- sub("[._-].*$", "", samples)
+    meta <- data.frame(sample = samples, ploidy = ploidy,
+                       genotype = geno_guess, stringsAsFactors = FALSE)
+  }
+  
+  # genotype_center:
+  #   For each genotype, subtract the per-genotype mean from each gene.
+  #   Correlations then reflect systematic ploidy effects rather than fixed genotype offsets.
+  genotype_center <- function(mat, meta) {
+    Z <- mat
+    for (g in unique(meta$genotype)) {
+      idx <- which(meta$genotype == g)
+      mu  <- rowMeans(Z[, idx, drop = FALSE])
+      Z[, idx] <- sweep(Z[, idx, drop = FALSE], 1, mu, "-")
+    }
+    Z
+  }
+  
+  data_gc <- genotype_center(data, meta)
+  
+  # -----------------------------
+  # Core helpers (correlations, thresholding, adjacency, clustering)
+  # -----------------------------
+  # corr_edge_list_from_matrix:
+  #   Returns upper-triangular edge list with correlation and adj. p-values.
+  #   If shrink=TRUE, uses corpcor::cor.shrink (James–Stein shrinkage).
+  
+  corr_edge_list_from_matrix <- function(M,
+                                         method_adj = input_parameter$correction_method,
+                                         type = input_parameter$type_correlation,
+                                         shrink = use_shrinkage) {
+    if (!shrink) {
+      rc <- Hmisc::rcorr(t(M), type = type)
+      rho <- rc$r; pval <- rc$P
+    } else {
+      rho <- corpcor::cor.shrink(t(M))
+      n   <- ncol(M)
+      tval <- rho * sqrt((n - 2) / pmax(1e-8, 1 - rho^2))
+      pval <- 2 * pt(-abs(tval), df = n - 2)
+      diag(pval) <- 0
+    }
+    pval_adj <- p.adjust(pval, method = method_adj)
+    pval_adj <- matrix(pval_adj, ncol = ncol(pval),
+                       dimnames = list(rownames(rho), colnames(rho)))
+    ut <- upper.tri(rho)
+    data.frame(
+      source = rownames(rho)[row(rho)[ut]],
+      target = colnames(rho)[col(rho)[ut]],
+      correlation = rho[ut],
+      pval = pval[ut],
+      pval_adj = pval_adj[ut],
+      stringsAsFactors = FALSE
+    )
+  }
+  
+  # build_network:
+  #   Applies correlation quantile and adjusted p-value thresholds.
+  
+  build_network <- function(corr_edges,
+                            thr_q = input_parameter$threshold_prc_corr,
+                            thr_padj = input_parameter$threshold_pval_adj_corr) {
+    thr_corr <- quantile(corr_edges$correlation, thr_q, na.rm = TRUE)
+    thr_corr <- round(as.numeric(thr_corr), 4)
+    keep <- which((abs(corr_edges$correlation) >= thr_corr) &
+                    (corr_edges$pval_adj <= thr_padj))
+    corr_edges[keep, , drop = FALSE]
+  }
+  
+  # weighted_adj:
+  #   Builds weighted adjacency matrix (W[i,j] = correlation; 0 if no edge).
+  
+  weighted_adj <- function(net) {
+    if (nrow(net) == 0) return(matrix(0, 0, 0))
+    src <- net$source; tgt <- net$target; w <- net$correlation
+    nodes <- unique(c(src, tgt))
+    N <- length(nodes)
+    W <- matrix(0, N, N, dimnames = list(nodes, nodes))
+    for (i in seq_len(nrow(net))) {
+      W[src[i], tgt[i]] <- w[i]
+      W[tgt[i], src[i]] <- w[i]
+    }
+    W
+  }
+  
+  # kmeans_idx:
+  #   k-means clustering on rows of W; returns cluster index and quality stats.
+  
+  kmeans_idx <- function(W, k = input_parameter$num_clusters,
+                         iter_max = input_parameter$iter_max,
+                         nstart = input_parameter$num_repeats) {
+    if (nrow(W) < k || k < 2) {
+      # minimal fallback (single cluster when too few nodes)
+      cl <- rep(1, nrow(W))
+      return(list(idx = factor(cl, levels = 1), size = nrow(W),
+                  WSS = NA, TWSS = NA))
+    }
+    model <- kmeans(W, centers = k, iter.max = iter_max, nstart = nstart)
+    list(idx = factor(model$cluster, levels = seq_len(k)),
+         size = model$size, WSS = model$withinss, TWSS = model$tot.withinss)
+  }
+  
+  # -----------------------------
+  # Cartography & switch helpers (mirror of your pipeline)
+  # -----------------------------
+  # apcc_fn: Average PCC per node (ignore zeros when averaging).
+  
+  apcc_fn <- function(W) {
+    if (length(W) == 0) return(setNames(numeric(0), character(0)))
+    Wz <- W; Wz[Wz == 0] <- NA
+    out <- rowMeans(Wz, na.rm = TRUE)
+    names(out) <- rownames(W)
+    out
+  }
+  
+  # binarize: turn W into 0/1 adjacency.
+  
+  binarize <- function(W) { out <- W; out[out != 0] <- 1; out }
+  
+  # cluster_matrix: build 0/1 matrix C where C[i,j]=1 if same k-means cluster.
+  
+  cluster_matrix <- function(idx, W) {
+    if (length(idx) == 0) return(matrix(0, 0, 0))
+    df <- data.frame(node = names(idx), cl = as.integer(idx), stringsAsFactors = FALSE)
+    l <- split(df$node, df$cl)
+    pairs <- data.table::rbindlist(lapply(l, function(y) {
+      if (length(y) == 1) {
+        data.frame(source = y, target = y, stringsAsFactors = FALSE)
+      } else {
+        as.data.frame(expand.grid(y, y), stringsAsFactors = FALSE)
+      }
+    }))
+    g <- graph_from_data_frame(pairs, directed = FALSE)
+    g <- simplify(g, remove.multiple = TRUE, remove.loops = TRUE)
+    C <- as.matrix(as_adj(g, type = "both"))
+    C[match(rownames(W), rownames(C)), match(colnames(W), colnames(C))]
+  }
+  
+  # deg_lists: total degree (deg) and internal degree (ideg) per node.
+  
+  deg_lists <- function(W, idx) {
+    if (length(idx) == 0) return(list(deg = setNames(numeric(0), character(0)),
+                                      ideg = setNames(numeric(0), character(0))))
+    C  <- cluster_matrix(idx, W)
+    A  <- binarize(W)
+    zc <- C * A
+    d  <- rowSums(A); names(d) <- rownames(W)
+    id <- rowSums(zc); names(id) <- rownames(W)
+    list(deg = d, ideg = id)
+  }
+  
+  # compute_Pz: z (within-module degree z-score) and P (participation coefficient).
+  
+  compute_Pz <- function(nodes, deg, ideg) {
+    m <- mean(deg[nodes]); s <- sd(deg[nodes])
+    if (is.na(s) || s == 0) s <- 1
+    z <- (ideg[nodes] - m) / s
+    P <- 1 - (ideg[nodes] / pmax(1, deg[nodes]))^2
+    list(P = setNames(P, nodes), z = setNames(z, nodes))
+  }
+  
+  # node_role: assigns cartography regions R1–R7 and hub/not hub.
+  
+  node_role <- function(z, P) {
+    hub    <- ifelse(z < 2.5, "non local hub", "local hub")
+    region <- ifelse(z < 2.5 & P <= 0.04, "R1",
+                     ifelse(z < 2.5 & P <= 0.625, "R2",
+                            ifelse(z < 2.5 & P <= 0.8, "R3",
+                                   ifelse(z < 2.5, "R4",
+                                          ifelse(P <= 0.3, "R5",
+                                                 ifelse(P <= 0.75, "R6", "R7"))))))
+    type   <- ifelse(z < 2.5 & P <= 0.04, "Ultra-peripheral nodes",
+                     ifelse(z < 2.5 & P <= 0.625, "Peripheral nodes",
+                            ifelse(z < 2.5 & P <= 0.8, "Non-hub connectors",
+                                   ifelse(z < 2.5, "Non-hub kinless nodes",
+                                          ifelse(P <= 0.3, "Provincial hubs",
+                                                 ifelse(P <= 0.75, "Connector hubs", "Kinless hubs"))))))
+    list(hub = hub, region = region, type = type)
+  }
+  
+  # hub_class_fn: DATE / PARTY / FIGHT CLUB / no hub (based on APCC and degree).
+  
+  hub_class_fn <- function(apcc_vec, deg_vec) {
+    ifelse(apcc_vec > 0 & apcc_vec < 0.5 & deg_vec >= 5, "DATE",
+           ifelse(apcc_vec >= 0.5 & deg_vec >= 5, "PARTY",
+                  ifelse(apcc_vec < 0 & deg_vec >= 5, "FIGHT CLUB",
+                         ifelse(deg_vec < 5, "no hub", "not available"))))
+  }
+  
+  # -----------------------------
+  # Full reference run (used to score all resampling runs)
+  # -----------------------------
+  
+  corr_full <- corr_edge_list_from_matrix(data_gc)
+  net_full  <- build_network(corr_full)
+  W_full    <- weighted_adj(net_full)
+  
+  km_full   <- kmeans_idx(W_full)
+  nodes_full <- rownames(W_full)
+  
+  apcc_full <- apcc_fn(W_full)
+  dgl_full  <- deg_lists(W_full, km_full$idx)
+  par_full  <- compute_Pz(nodes_full, dgl_full$deg, dgl_full$ideg)
+  role_full <- node_role(par_full$z, par_full$P)
+  hubc_full <- hub_class_fn(apcc_full, dgl_full$deg)
+  
+  attr_full <- data.frame(
+    node = nodes_full,
+    Region = role_full$region,
+    Hub_classification = hubc_full,
+    stringsAsFactors = FALSE
+  )
+  switches_full <- attr_full$node[attr_full$Region == "R4" &
+                                    attr_full$Hub_classification == "FIGHT CLUB"]
+  
+  # -----------------------------
+  # Metrics (edge Jaccard, module ARI, switch recovery)
+  # -----------------------------
+  
+  jaccard_edges <- function(netA, netB) {
+    if (nrow(netA) == 0 && nrow(netB) == 0) return(1)
+    if (nrow(netA) == 0 || nrow(netB) == 0) return(0)
+    key <- function(df) paste(pmin(df$source, df$target),
+                              pmax(df$source, df$target), sep = "||")
+    a <- unique(key(netA)); b <- unique(key(netB))
+    length(intersect(a, b)) / length(unique(c(a, b)))
+  }
+  
+  ari_modules <- function(WA, WB) {
+    if (nrow(WA) < 3 || nrow(WB) < 3) return(NA_real_)
+    ia <- intersect(rownames(WA), rownames(WB))
+    if (length(ia) < 3) return(NA_real_)
+    kma <- kmeans_idx(WA[ia, ia])$idx
+    kmb <- kmeans_idx(WB[ia, ia])$idx
+    adjustedRandIndex(as.integer(kma), as.integer(kmb))
+  }
+  
+  switch_recovery <- function(sw_ref, sw_run) {
+    if (length(sw_ref) == 0 && length(sw_run) == 0) return(1)
+    if (length(sw_ref) == 0) return(NA_real_)
+    length(intersect(sw_ref, sw_run)) / length(unique(sw_ref))
+  }
+  
+  # -----------------------------
+  # Single resampling run wrapper
+  # -----------------------------
+  
+  single_run <- function(sel_samples, tag, run_id) {
+    M <- data_gc[, sel_samples, drop = FALSE]
+    corr <- corr_edge_list_from_matrix(M)
+    net  <- build_network(corr)
+    W    <- weighted_adj(net)
+    
+    jac  <- jaccard_edges(net_full, net)
+    ari  <- tryCatch(ari_modules(W_full, W), error = function(e) NA_real_)
+    
+    # switches del run
+    if (nrow(W) >= 3) {
+      km   <- kmeans_idx(W)
+      apcc_v <- apcc_fn(W)
+      dgl    <- deg_lists(W, km$idx)
+      nodesR <- rownames(W)
+      par    <- compute_Pz(nodesR, dgl$deg, dgl$ideg)
+      role   <- node_role(par$z, par$P)
+      hubc   <- hub_class_fn(apcc_v, dgl$deg)
+      attr   <- data.frame(node = nodesR, Region = role$region,
+                           Hub_classification = hubc, stringsAsFactors = FALSE)
+      sw     <- attr$node[attr$Region == "R4" &
+                            attr$Hub_classification == "FIGHT CLUB"]
+    } else {
+      sw <- character(0)
+    }
+    
+    sw_rec <- switch_recovery(switches_full, sw)
+    
+    data.frame(
+      run_type = tag,
+      run_id = run_id,
+      n_samples = length(sel_samples),
+      edge_jaccard = jac,
+      module_ARI = ari,
+      switch_recovery = sw_rec,
+      stringsAsFactors = FALSE
+    ) -> row
+    
+    list(row = row, switches = sw)
+  }
+  
+  details_list <- list()
+  all_switches <- list()
+  
+  # -----------------------------
+  # LOO
+  # -----------------------------
+  
+  for (s in seq_along(samples)) {
+    sel <- samples[-s]
+    res <- single_run(sel, "LOO", paste0("LOO_", samples[s]))
+    details_list[[length(details_list) + 1]] <- res$row
+    all_switches[[res$row$run_id]] <- res$switches
+  }
+  
+  # -----------------------------
+  # Stratified 80% subsampling (by genotype)
+  # -----------------------------
+  
+  for (b in seq_len(n_subsamples)) {
+    keep <- c()
+    for (g in unique(meta$genotype)) {
+      idx <- which(meta$genotype == g)
+      k   <- max(1, floor(length(idx) * frac_keep))
+      keep <- c(keep, sample(idx, k))
+    }
+    keep <- sort(unique(keep))
+    res <- single_run(samples[keep], "Subsample80", sprintf("SUB_%03d", b))
+    details_list[[length(details_list) + 1]] <- res$row
+    all_switches[[res$row$run_id]] <- res$switches
+  }
+  
+  details_df <- data.table::rbindlist(details_list, fill = TRUE)
+  data.table::fwrite(details_df, file_detail)
+  
+  # -----------------------------
+  # Consensus switches (≥50% of all runs)
+  # -----------------------------
+  
+  all_sw_vec <- unlist(all_switches, use.names = FALSE)
+  if (length(all_sw_vec)) {
+    tab <- sort(table(all_sw_vec), decreasing = TRUE)
+    thr <- ceiling(0.5 * length(all_switches))
+    cons <- names(tab)[tab >= thr]
+    fwrite(data.frame(switch_gene = cons,
+                      count = as.integer(tab[cons]),
+                      runs = length(all_switches)),
+           file_cons_sw)
+  } else {
+    fwrite(data.frame(switch_gene = character(0),
+                      count = integer(0),
+                      runs = length(all_switches)),
+           file_cons_sw)
+  }
+  
+  # -----------------------------
+  # Summary + Figure (boxplots)
+  # -----------------------------
+  
+  summary_df <- details_df[
+    , .(
+      n = .N,
+      edge_jaccard_mean = mean(edge_jaccard, na.rm = TRUE),
+      edge_jaccard_sd   = sd(edge_jaccard, na.rm = TRUE),
+      module_ARI_mean   = mean(module_ARI, na.rm = TRUE),
+      module_ARI_sd     = sd(module_ARI, na.rm = TRUE),
+      switch_recovery_mean = mean(switch_recovery, na.rm = TRUE),
+      switch_recovery_sd   = sd(switch_recovery, na.rm = TRUE)
+    ),
+    by = run_type
+  ]
+  data.table::fwrite(summary_df, file_summary)
+  
+  # PDF con 3 boxplot (Edge Jaccard, ARI, Switch recovery)
+  pdf(file_fig, width = 7, height = 7)
+  op <- par(mfrow = c(3,1), mar = c(4,4,2,1))
+  boxplot(edge_jaccard ~ run_type, data = details_df,
+          ylab = "Edge Jaccard vs Full", xlab = "", main = "Edge stability")
+  abline(h = median(details_df$edge_jaccard[details_df$run_type=="Subsample80"], na.rm=TRUE),
+         lty = 2)
+  boxplot(module_ARI ~ run_type, data = details_df,
+          ylab = "Adjusted Rand Index", xlab = "", main = "Module stability (k-means)")
+  abline(h = median(details_df$module_ARI[details_df$run_type=="Subsample80"], na.rm=TRUE),
+         lty = 2)
+  boxplot(switch_recovery ~ run_type, data = details_df,
+          ylab = "Switch recovery", xlab = "", main = "Switch robustness")
+  abline(h = median(details_df$switch_recovery[details_df$run_type=="Subsample80"], na.rm=TRUE),
+         lty = 2)
+  par(op)
+  dev.off()
+  
+  invisible(list(detail = details_df, summary = summary_df))
+}
+                      
