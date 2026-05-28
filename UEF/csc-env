@@ -1,0 +1,29 @@
+[lingzhao@puhti-login11 ~]$ csc-env test
+Info
+---------------------
+User: lingzhao
+Host: puhti-login11
+Home: /users/lingzhao
+Home quota
+    capacity: 0 %
+    files:    0 %
+Default shell: /bin/bash 
+Environment test
+---------------------
+PATH is modified NOTE
+LD_LIBRARY_PATH has default value OK
+LD_PRELOAD has default value OK
+PYTHONPATH has default value OK
+MODULEPATH has default value OK
+MODULEPATH_ROOT has default value OK
+TMPDIR has default value OK
+CDPATH has default value OK
+Command alias has default output OK
+Command module list has default output OK
+$HOME permission is 0700: OK
+SSH folder permission is 0700: FAILED
+File diff test
+---------------------
+/users/lingzhao/.bashrc same as default OK
+/users/lingzhao/.bash_profile same as default OK
+/users/lingzhao/.bash_logout does not exist NOTE

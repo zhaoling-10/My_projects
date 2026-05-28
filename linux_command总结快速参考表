@@ -1,0 +1,90 @@
+ssh lingzhao@puhti.csc.fi
+1.总结快速参考表
+文件类型					解压命令
+.zip					unzip 文件.zip
+.tar.gz 或 .tgz			tar -xzf 文件.tar.gz
+.gz						gunzip 文件.gz
+.tar.bz2				tar -xjf 文件.tar.bz2
+.tar.xz					tar -xJf 文件.tar.xz
+.rar					unrar x 文件.rar
+
+
+2. Finished variant detection  ----------------------------> 10_variant_calling.sh. 
+screen -S variant
+srun --account=project_2002674 --partition=small --time=20:00:00 --mem=128G --cpus-per-task=10 --pty bash
+
+module load samtools 
+
+bash 10_variant_calling.sh
+
+screen -r variant
+How to check whether files right.
+gunzip -t all.raw.vcf.gz && echo "✅ Raw VCF Complete"
+gunzip -t all.filtered.vcf.gz && echo "✅ Filtered VCF Complete"
+bcftools view -H all.raw.vcf.gz | wc -l 
+bcftools view -H all.filtered.vcf.gz | wc -l   ----------> output 0 is meaning that the filtering criteria are too strict
+
+
+3. how to set ssh keys?
+
+step one：检查你本地有没有 SSH key
+
+(1) 在你本地终端运行：
+ls ~/.ssh
+看有没有类似：
+id_rsa
+id_rsa.pub
+或者：
+id_ed25519
+id_ed25519.pub
+❗ 如果没有 → 生成一个 key
+ssh-keygen -t ed25519 -C "your_email@example.com"
+一路回车就行（不要设密码也可以）
+
+step two：把公钥上传到 CSC（Puhti）
+运行：
+cat ~/.ssh/id_ed25519.pub
+复制输出的一整行（很长的那一行）
+然后：
+打开 CSC MyCSC 页面
+👉 https://my.csc.fi
+登录你的账号
+找到：
+My Profile → SSH Keys
+粘贴刚才复制的 key
+保存
+
+step three：测试是否能登录
+ssh lingzhao@puhti.csc.fi
+如果成功，就说明 OK 了 👍
+
+step four：再运行你的 scp
+scp /home/zhaoling/Downloads/Lepus_Annotation/Lepus_timidus_annotation.zip \
+lingzhao@puhti.csc.fi:/scratch/project_2002674/RNAseq_hares/scripts/RNA-Seq_trial/RNA-Seq_PRJNA826339/lepus_timidus_gff/ref_src
+
+
+┌────┬──────────────────┬─────────┬──────────────────────────────┐
+│ # │ 脚本名           │ 必需    │ 功能概述                     │
+├────┼──────────────────┼─────────┼──────────────────────────────┤
+│00 │setup.sh          │必需     │项目初始化、创建目录          │
+│01 │config_sratoolkit │必需*    │配置 SRA 工具                │
+│02 │prefetch.sh       │必需*    │从 NCBI 下载原始数据          │
+│03 │fasterq_dump.sh   │必需*    │SRA→FASTQ 格式转换            │
+│04 │prepare_reference │必需     │准备参考基因组和注释          │
+│05 │fastp.sh          │必需     │质量控制、去接头、修剪       │
+│06 │star_index.sh     │必需     │建立 STAR 比对索引            │
+│07 │star_align.sh     │必需     │序列比对到基因组              │
+│08 │post_alignment_qc │必需     │比对质量统计                 │
+│09 │featurecounts.sh  │必需     │基因表达计数 ★               │
+│10 │variant_calling.sh│可选     │变异检测                     │
+│11 │multiqc.sh        │可选     │生成综合质量报告              │
+├────┴──────────────────┴─────────┴──────────────────────────────┤
+│ * = 如果已有原始数据，01-03 可以跳过                          │
+│ ★ = 最重要的步骤，输出用于 DESeq2 分析                       │
+└──────────────────────────────────────────────────────────────────┘
+
+
+DESeq2 使用中位数比值法（median-of-ratios），EdgeR 使用 TMM（trimmed mean of M-values）Limma-Voom 使用 log-CPM
+tail -n +2 gene_counts_featureCounts_Exon_Goal_s2.txt > LE_counts_raw.txt(delete first raw)
+
+

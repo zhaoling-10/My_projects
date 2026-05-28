@@ -156,7 +156,7 @@ library(readxl)
 # if (!requireNamespace("devtools", quietly = TRUE))
 #     install.packages("devtools")
 # 1. 安装 sva（用于批次效应矫正）
-BiocManager::install("genefilter", dependencies = TRUE, force = TRUE)
+# ::install("genefilter", dependencies = TRUE, force = TRUE)
 # BiocManager::install("sva", force = TRUE)
 # library(sva)
 # 2. 安装 GOSim（用于GO语义相似性计算）

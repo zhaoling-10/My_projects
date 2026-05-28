@@ -1,0 +1,38 @@
+
+
+ trypsinization 
+ quadruplicate, 
+pelleted 
+resuspended 
+Rotenone (Sigma-Aldrich),
+ inhibitor 
+complex
+drives
+excluding negative controls, 
+stained 
+CellROX Green (Invitrogen) 
+exhibits fluores- cence upon oxidation by ROS, 
+pelleted and resuspended 
+fluorescence-activated cell sorting (FACS) buffer 
+consisting of DPBS and 2 % FBS.  fluorescent intensities of CellROX Green (Ex 488 nm, Em 525/40 nm) 
+CytoFlex S flow cytometer (Beckman Coulter). 
+胰蛋白酶消化
+四重复
+沉淀
+重悬
+旋覆酮 (Sigma-Aldrich)
+抑制剂
+复合物
+驱动
+排除阴性对照
+染色
+CellROX Green (Invitrogen)
+通过ROS氧化表现荧光
+沉淀并重悬
+流式细胞分选 (FACS) 缓冲液
+由DPBS和2% FBS组成
+CellROX Green的荧光强度 (激发 488 nm, 发射 525/40 nm)
+CytoFlex S流式细胞仪 (贝克曼库尔特)
+
+
+关于我们上周三下午发现的 gene_counts_featureCounts.txt 问题，我已经进行了修正。它现在在路径 /scratch/project_2002674/RNAseq_hares/scripts/RNA-Seq_trial/RNA-Seq_PRJNA826339/counts/gene_counts_featureCounts.txt 中是正确的。我还没有将 lepus_timidus 数据移动到统一文件夹，因为 10_variant_calling.sh 生成的结果文件有问题，我仍在调查原因。我稍后会将 lepus_timidus 数据移动到 lepus_timidus 文件夹。
